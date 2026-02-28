@@ -4,6 +4,7 @@ import {
   streamingAgentId,
   appendMessage,
   lastTranscription,
+  updateConversationTopic,
 } from '../state/conversations.ts'
 import { activeCall, currentSpeaker } from '../state/call.ts'
 import { generateId } from '../utils/format.ts'
@@ -84,6 +85,9 @@ class WebSocketManager {
         streamingMessage.value = null
         streamingAgentId.value = null
         appendMessage(event.message)
+        break
+      case 'topic_set':
+        updateConversationTopic(event.topic)
         break
       case 'oracle_reasoning':
         appendMessage({

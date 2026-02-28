@@ -38,3 +38,11 @@ export function appendMessage(message: Message) {
 export function addOptimisticMessage(message: Message) {
   appendMessage(message)
 }
+
+export function updateConversationTopic(topic: string) {
+  const id = activeConversationId.value
+  if (!id) return
+  const conv = conversations.value.find((c) => c.id === id)
+  if (!conv) return
+  upsertConversation({ ...conv, topic })
+}

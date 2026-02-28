@@ -209,7 +209,13 @@ async def _handle_group_streaming(
         async for event_type, data in oracle.run_group_turn_streaming(
             conv, content, attachments or None
         ):
-            if event_type == "oracle":
+            if event_type == "topic_set":
+                await _send(ws, {
+                    "type": "topic_set",
+                    "topic": data.get("topic", ""),
+                })
+
+            elif event_type == "oracle":
                 await _send(ws, {
                     "type": "oracle_reasoning",
                     "reasoning": data.get("reasoning", ""),

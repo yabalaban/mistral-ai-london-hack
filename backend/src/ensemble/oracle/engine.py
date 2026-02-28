@@ -115,9 +115,14 @@ class OracleEngine:
 
         # Extract or use existing topic
         topic = conversation.topic
-        if not topic:
-            topic = await self._extract_topic(conversation)
-            conversation.topic = topic
+        if not topic or topic == "General discussion":
+            new_topic = await self._extract_topic(conversation)
+            if new_topic != "General discussion":
+                conversation.topic = new_topic
+                self._topic_just_set = new_topic
+            topic = new_topic
+        else:
+            self._topic_just_set = None
 
         system = ORACLE_SYSTEM.format(
             topic=topic,
@@ -269,6 +274,11 @@ class OracleEngine:
             next_id, hint, reasoning, done = await self.decide_next_speaker(
                 conversation, last_speaker, speakers_this_round
             )
+
+            # Emit topic when first extracted
+            if getattr(self, "_topic_just_set", None):
+                yield ("topic_set", {"topic": self._topic_just_set})
+                self._topic_just_set = None
 
             if done or next_id is None:
                 if reasoning:

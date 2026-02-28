@@ -96,7 +96,20 @@ export function ChatPage({ id }: ChatPageProps) {
 
   const agentId = conv?.participants.find((p) => p !== 'user')
   const agent = agentId ? agentMap.value.get(agentId) : null
-  const title = agent?.name ? `Chat with ${agent.name}` : 'Chat'
+
+  let title: string
+  if (conv?.type === 'group') {
+    if (conv.topic && conv.topic !== 'General discussion') {
+      title = conv.topic.length > 60 ? conv.topic.slice(0, 57) + '...' : conv.topic
+    } else {
+      const names = conv.participants
+        .map((id) => agentMap.value.get(id)?.name ?? id)
+        .join(', ')
+      title = names
+    }
+  } else {
+    title = agent?.name ? `Chat with ${agent.name}` : 'Chat'
+  }
 
   return (
     <>

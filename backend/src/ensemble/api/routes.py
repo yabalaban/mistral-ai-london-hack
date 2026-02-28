@@ -83,6 +83,7 @@ async def create_conversation(req: CreateConversationRequest):
         "type": conv.type,
         "participants": conv.participant_agent_ids,
         "messages": [],
+        "topic": conv.topic,
         "created_at": conv.created_at.isoformat(),
     }
 
@@ -95,6 +96,7 @@ async def list_conversations():
             "type": c.type,
             "participants": c.participant_agent_ids,
             "message_count": len(c.messages),
+            "topic": c.topic,
             "created_at": c.created_at.isoformat(),
         }
         for c in _conversation_mgr.list_all()
@@ -111,6 +113,7 @@ async def get_conversation(conversation_id: str):
         "type": conv.type,
         "participants": conv.participant_agent_ids,
         "messages": [_message_to_dict(m) for m in conv.messages],
+        "topic": conv.topic,
         "created_at": conv.created_at.isoformat(),
     }
 
