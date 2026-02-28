@@ -209,7 +209,16 @@ async def _handle_group_streaming(
         async for event_type, data in oracle.run_group_turn_streaming(
             conv, content, attachments or None
         ):
-            if event_type == "handoff":
+            if event_type == "oracle":
+                await _send(ws, {
+                    "type": "oracle_reasoning",
+                    "reasoning": data.get("reasoning", ""),
+                    "next_speaker": data.get("next_speaker"),
+                    "next_speaker_name": data.get("next_speaker_name"),
+                    "hint": data.get("hint", ""),
+                })
+
+            elif event_type == "turn_change":
                 agent_id = data.get("agent_id")
                 msg_ids[agent_id] = _uuid.uuid4().hex[:12]
                 await _send(ws, {

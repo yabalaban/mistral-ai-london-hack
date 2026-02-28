@@ -38,8 +38,12 @@ class OracleEngine:
 
     async def decide_next_speaker(
         self, conversation: Conversation, last_speaker: str | None = None
-    ) -> tuple[str, str]:
-        """Pick the next agent to speak. Returns (agent_id, hint)."""
+    ) -> tuple[str, str, str]:
+        """Pick the next agent to speak.
+
+        Returns (agent_id, hint, reasoning) where reasoning explains
+        the oracle's decision for the transcript pane.
+        """
         agent_ids = conversation.participant_agent_ids
         agents_desc = []
         for aid in agent_ids:
@@ -61,7 +65,9 @@ class OracleEngine:
             "You are a conversation moderator. Pick ONE participant to speak next.\n"
             f"Participants: {', '.join(agents_desc)}\n"
             f"Last speaker: {last_speaker or 'none'}\n\n"
-            "Respond ONLY with JSON: {\"next_speaker\": \"<id>\", \"hint\": \"<brief direction>\"}\n"
+            "Respond with JSON:\n"
+            "{\"reasoning\": \"<1-2 sentences explaining your choice>\", "
+            "\"next_speaker\": \"<id>\", \"hint\": \"<brief direction for them>\"}\n"
             "Rules:\n"
             "- Rotate between participants — don't pick the same one twice in a row\n"
             "- Pick the most relevant person for the current topic\n"
@@ -85,19 +91,19 @@ class OracleEngine:
             data = json.loads(text)
             next_id = data.get("next_speaker", agent_ids[0])
             hint = data.get("hint", "Share your perspective")
+            reasoning = data.get("reasoning", "")
 
             # Validate
             if next_id not in agent_ids:
                 next_id = agent_ids[0]
 
-            return next_id, hint
+            return next_id, hint, reasoning
         except Exception:
             logger.exception("Oracle decision failed, picking first available")
-            # Fallback: pick someone who isn't last_speaker
             for aid in agent_ids:
                 if aid != last_speaker:
-                    return aid, "Share your thoughts"
-            return agent_ids[0], "Share your thoughts"
+                    return aid, "Share your thoughts", "Fallback — rotating speakers"
+            return agent_ids[0], "Share your thoughts", "Fallback — only one speaker"
 
     def build_agent_prompt(
         self, conversation: Conversation, agent_id: str, hint: str
@@ -134,9 +140,10 @@ class OracleEngine:
         """Generator yielding events for a group conversation turn.
 
         For each speaker the oracle picks:
-        1. Yields ("turn_change", {"agent_id": ...})
-        2. Streams response chunks: ("chunk", {"agent_id": ..., "content": ...})
-        3. Yields completed message: ("message", Message)
+        1. Yields ("oracle", {"reasoning": ..., "next_speaker": ..., "hint": ...})
+        2. Yields ("turn_change", {"agent_id": ...})
+        3. Streams response chunks: ("chunk", {"agent_id": ..., "content": ...})
+        4. Yields completed message: ("message", Message)
         """
         # Record user message
         user_msg = Message(
@@ -151,7 +158,16 @@ class OracleEngine:
 
         for _ in range(speakers_count):
             # Oracle picks next speaker
-            next_id, hint = await self.decide_next_speaker(conversation, last_speaker)
+            next_id, hint, reasoning = await self.decide_next_speaker(conversation, last_speaker)
+
+            # Emit oracle reasoning for transcript pane
+            agent = self._registry.get(next_id)
+            yield ("oracle", {
+                "reasoning": reasoning,
+                "next_speaker": next_id,
+                "next_speaker_name": agent.name if agent else next_id,
+                "hint": hint,
+            })
             agent = self._registry.get(next_id)
             if not agent or not agent.mistral_agent_id:
                 continue
