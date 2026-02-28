@@ -8,7 +8,11 @@ Function tool schema (for Mistral):
     "type": "function",
     "function": {
         "name": "create_slides",
-        "description": "Create a presentation from structured slide data. Each slide has a title and bullet points. Returns a URL to view the presentation.",
+        "description": (
+            "Create a presentation from structured slide data. "
+            "Each slide has a title and bullet points. "
+            "Returns a URL to view the presentation."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -55,7 +59,6 @@ from __future__ import annotations
 import html
 import logging
 import uuid
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +127,7 @@ def create_slides(
 ) -> dict[str, str]:
     """Generate a Reveal.js presentation, store it, and generate PDF.
 
-    Returns {"presentation_id": "...", "url": "/api/slides/<id>", "pdf_url": "/api/slides/<id>/pdf"}.
+    Returns presentation_id, view URL, and PDF URL.
     """
     pres_id = uuid.uuid4().hex[:12]
     html_content = _render_revealjs(title, slides, author)
@@ -166,17 +169,20 @@ def _render_pdf(html_content: str) -> bytes:
 
     Uses Reveal.js print-pdf mode for proper slide layout.
     """
+    import tempfile
+
     from playwright.sync_api import sync_playwright
 
     # Inject ?print-pdf to trigger Reveal.js print mode
     # We need to write the HTML to a temp file and add the print-pdf query
-    import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
         # Modify the HTML to auto-enable print-pdf mode
         modified = html_content.replace(
             "Reveal.initialize({",
-            "Reveal.initialize({\n      pdfSeparateFragments: false,\n      pdfMaxPagesPerSlide: 1,",
+            "Reveal.initialize({\n"
+            "      pdfSeparateFragments: false,\n"
+            "      pdfMaxPagesPerSlide: 1,",
         )
         f.write(modified)
         tmp_path = f.name

@@ -6,7 +6,7 @@ import {
   addOptimisticMessage,
 } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
-import { activeCall, callMode } from '../../state/call.ts'
+import { activeCall, callMode, isMicOn, partialTranscript } from '../../state/call.ts'
 import { startCall, endCall } from '../../api/client.ts'
 import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
@@ -17,8 +17,6 @@ import { ChatInput } from '../chat/ChatInput.tsx'
 import { MessageList } from '../chat/MessageList.tsx'
 import { AgentPicker } from './AgentPicker.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
-import { LogsPanel } from '../shared/LogsPanel.tsx'
-import type { LogEntry } from '../shared/LogsPanel.tsx'
 import { generateId } from '../../utils/format.ts'
 import type { Attachment } from '../../types/index.ts'
 
@@ -30,13 +28,11 @@ interface GroupPageProps {
 }
 
 export function GroupPage({ id }: GroupPageProps) {
-  if (!id) return null
-
-  useConversation(id)
+  useConversation(id ?? '')
   const { toggleMic } = useVoice()
   const [showPicker, setShowPicker] = useState(false)
-  const [logsOpen, setLogsOpen] = useState(false)
-  const [logEntries] = useState<LogEntry[]>([])
+
+  if (!id) return null
 
   const conv = activeConversation.value
   const call = activeCall.value
@@ -57,6 +53,10 @@ export function GroupPage({ id }: GroupPageProps) {
     try {
       const call = await startCall(id)
       activeCall.value = call
+      // Default to voice mode and auto-start mic
+      callMode.value = 'voice'
+      // Small delay to ensure state is set before toggling mic
+      toggleMic()
     } catch (err) {
       console.error('Failed to start call', err)
     }
@@ -67,12 +67,17 @@ export function GroupPage({ id }: GroupPageProps) {
       activeCall.value = null
       return
     }
+    // Stop mic if active before ending call
+    if (isMicOn.value) {
+      toggleMic()
+    }
     try {
       await endCall(id)
     } catch (err) {
       console.error('Failed to end call', err)
     }
     activeCall.value = null
+    callMode.value = 'text'
   }
 
   const handleToggleMode = () => {
@@ -121,7 +126,7 @@ export function GroupPage({ id }: GroupPageProps) {
 
   return (
     <>
-      <Header title={title} onToggleLogs={() => setLogsOpen((o) => !o)}>
+      <Header title={title}>
         {!call ? (
           <button
             onClick={handleStartCall}
@@ -156,22 +161,32 @@ export function GroupPage({ id }: GroupPageProps) {
 
       <div class="flex-1 flex overflow-hidden">
         <div class="flex-1 flex flex-col">
-          {call && <ParticipantRing participantIds={participants} />}
-          {!call && <MessageList messages={conv.messages} />}
-          {call && mode === 'text' && (
+          {call && (
+            <div class="flex-none border-b border-white/10">
+              <ParticipantRing participantIds={participants} />
+            </div>
+          )}
+          <div class="flex-1 overflow-hidden relative">
+            <MessageList messages={conv.messages} />
+            {/* Partial transcript overlay — shows what user is currently saying */}
+            {call && mode === 'voice' && partialTranscript.value && (
+              <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-white/60 text-sm italic animate-pulse">
+                🎤 {partialTranscript.value}
+              </div>
+            )}
+          </div>
+          {(!call || mode === 'text') && (
             <ChatInput onSend={handleSend} placeholder="Type a message to the group..." />
           )}
-          {call ? (
+          {call && (
             <CallControls
               onToggleMic={toggleMic}
               onEndCall={handleEndCall}
               onToggleMode={handleToggleMode}
             />
-          ) : (
-            <ChatInput onSend={handleSend} placeholder="Type a message to the group..." />
           )}
         </div>
-        <GroupMessages messages={conv.messages} />
+        {!call && <GroupMessages messages={conv.messages} />}
       </div>
 
       {showPicker && (
@@ -185,7 +200,6 @@ export function GroupPage({ id }: GroupPageProps) {
         />
       )}
 
-      <LogsPanel open={logsOpen} onClose={() => setLogsOpen(false)} entries={logEntries} />
     </>
   )
 }

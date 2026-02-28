@@ -8,6 +8,7 @@ const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
 
 export function useConversation(convId: string) {
   useEffect(() => {
+    if (!convId) return
     activeConversationId.value = convId
 
     if (USE_MOCKS) return
@@ -29,6 +30,7 @@ export function useConversation(convId: string) {
     }
 
     return () => {
+      activeConversationId.value = null
       wsManager.disconnect()
     }
   }, [convId])

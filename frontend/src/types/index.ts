@@ -52,5 +52,10 @@ export type WSEvent =
   | { type: 'call_started'; call: GroupCall }
   | { type: 'call_ended'; call_id: string }
   | { type: 'audio_chunk'; agent_id: string; data: string }
-  | { type: 'transcription'; text: string }
+  | { type: 'transcription'; text: string; final?: boolean }
+  | { type: 'partial_transcript'; text: string }
+  | { type: 'agent_speaking'; agent_id: string }
+  | { type: 'agent_done'; agent_id: string }
+  | { type: 'interrupt' }
+  | { type: 'agent_interrupted'; agent_id: string; by: string }
   | { type: 'error'; message: string }

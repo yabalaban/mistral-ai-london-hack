@@ -3,10 +3,9 @@ import {
   streamingMessage,
   streamingAgentId,
   appendMessage,
-  lastTranscription,
   updateConversationTopic,
 } from '../state/conversations.ts'
-import { activeCall, currentSpeaker } from '../state/call.ts'
+import { activeCall, currentSpeaker, agentSpeaking, partialTranscript } from '../state/call.ts'
 import { generateId } from '../utils/format.ts'
 
 type EventHandler = (event: WSEvent) => void
@@ -39,8 +38,10 @@ class WebSocketManager {
       }
     }
 
-    this.ws.onclose = () => {
-      console.log('[WS] Disconnected')
+    this.ws.onclose = (e) => {
+      console.log('[WS] Disconnected', e.code, e.reason)
+      // Don't reconnect if server explicitly rejected (conversation not found)
+      if (e.code === 4004) return
       if (this.currentConvId === convId) {
         this.reconnectTimer = setTimeout(() => this.connect(convId), 2000)
       }
@@ -129,9 +130,49 @@ class WebSocketManager {
       case 'call_ended':
         activeCall.value = null
         currentSpeaker.value = null
+        agentSpeaking.value = null
+        partialTranscript.value = null
         break
       case 'transcription':
-        lastTranscription.value = event.text
+        partialTranscript.value = null
+        // Add user's transcribed speech to the message list
+        appendMessage({
+          id: generateId(),
+          role: 'user',
+          content: event.text,
+          timestamp: new Date().toISOString(),
+        })
+        break
+      case 'partial_transcript':
+        partialTranscript.value = event.text
+        break
+      case 'agent_speaking':
+        agentSpeaking.value = event.agent_id
+        currentSpeaker.value = event.agent_id
+        break
+      case 'agent_done':
+        if (agentSpeaking.value === event.agent_id) {
+          agentSpeaking.value = null
+        }
+        currentSpeaker.value = null
+        break
+      case 'interrupt':
+        // Agent was interrupted — handled by useVoice to flush audio playback
+        agentSpeaking.value = null
+        currentSpeaker.value = null
+        break
+      case 'agent_interrupted':
+        // Agent-to-agent interruption
+        agentSpeaking.value = null
+        currentSpeaker.value = null
+        appendMessage({
+          id: generateId(),
+          role: 'system',
+          content: `⚡ ${event.by} interrupted ${event.agent_id}`,
+          timestamp: new Date().toISOString(),
+        })
+        break
+      default:
         break
     }
 

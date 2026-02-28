@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any, cast
 
 from mistralai import Mistral
 
@@ -22,7 +23,7 @@ from ensemble.conversations.models import (
     Message,
     MessageRole,
 )
-from ensemble.utils import build_inputs, extract_text_from_content
+from ensemble.utils import extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ class OracleEngine:
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
-                messages=messages,
+                messages=cast(Any, messages),
                 response_format={"type": "json_object"},
             )
             data = json.loads(response.choices[0].message.content.strip())
@@ -174,7 +175,8 @@ class OracleEngine:
                 continue
             name = agent.name.lower()
             # "Sofia, can you..." or "hey emma" or "emma:" etc.
-            if lower.startswith(name) or lower.startswith(f"hey {name}") or f"{name}," in lower or f"{name}:" in lower:
+            starts = lower.startswith(name) or lower.startswith(f"hey {name}")
+            if starts or f"{name}," in lower or f"{name}:" in lower:
                 return aid
         return None
 
@@ -194,12 +196,12 @@ class OracleEngine:
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
-                messages=[
+                messages=cast(Any, [
                     {"role": "system", "content": TOPIC_GRADER_SYSTEM},
                     {"role": "user", "content": "\n".join(
                         f"Message {i+1}: {m}" for i, m in enumerate(user_msgs[-5:])
                     )},
-                ],
+                ]),
                 response_format={"type": "json_object"},
             )
             data = json.loads(response.choices[0].message.content.strip())
@@ -238,7 +240,8 @@ class OracleEngine:
                 user_message = msg.content
                 break
 
-        topic = conversation.topic if conversation.topic and conversation.topic != "General discussion" else "none"
+        has_topic = conversation.topic and conversation.topic != "General discussion"
+        topic = conversation.topic if has_topic else "none"
 
         return AGENT_CONTEXT_TEMPLATE.format(
             name=name,
@@ -356,16 +359,16 @@ class OracleEngine:
     ) -> str | None:
         """Generate a concise summary of the round."""
         history = self._format_history(conversation.messages[-MAX_CONTEXT_MESSAGES:])
-        names = [
-            self._registry.get(s).name if self._registry.get(s) else s
-            for s in speakers
-        ]
+        names = []
+        for s in speakers:
+            agent = self._registry.get(s)
+            names.append(agent.name if agent else s)
         topic = conversation.topic or "the discussion"
 
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
-                messages=[
+                messages=cast(Any, [
                     {"role": "system", "content": (
                         "Summarize this discussion round in 2-3 bullet points. "
                         "Key decisions, disagreements, action items. Be concise."
@@ -374,13 +377,10 @@ class OracleEngine:
                         f"Topic: {topic}\nSpeakers: {', '.join(names)}\n\n"
                         + "\n".join(history)
                     )},
-                ],
+                ]),
             )
             return response.choices[0].message.content.strip()
         except Exception:
             logger.exception("Summary generation failed")
             return None
 
-    async def cleanup(self) -> None:
-        """No-op."""
-        pass

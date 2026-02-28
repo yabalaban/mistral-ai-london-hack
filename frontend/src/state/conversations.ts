@@ -5,7 +5,6 @@ export const conversations = signal<Conversation[]>([])
 export const activeConversationId = signal<string | null>(null)
 export const streamingMessage = signal<string | null>(null)
 export const streamingAgentId = signal<string | null>(null)
-export const lastTranscription = signal<string | null>(null)
 
 export const activeConversation = computed(() => {
   const id = activeConversationId.value

@@ -6,13 +6,20 @@ Protocol:
     {"type": "audio", "data": "<base64 wav audio>"}
     {"type": "start_call", "mode": "text|voice"}
     {"type": "end_call"}
+    {"type": "voice_state", "active": true/false}
+    {"type": "audio_stream", "data": "<base64 PCM 16kHz>"}
 
   Server → Client (JSON):
     {"type": "message_chunk", "agent_id": "emma", "content": "text", "message_id": "..."}
     {"type": "message_complete", "message": {id, role, agent_id, content, timestamp}}
     {"type": "turn_change", "agent_id": "dan"}
     {"type": "audio_chunk", "agent_id": "emma", "data": "<base64 mp3 audio>"}
-    {"type": "transcription", "text": "what the user said"}
+    {"type": "transcription", "text": "what the user said", "final": true}
+    {"type": "partial_transcript", "text": "real-time words"}
+    {"type": "agent_speaking", "agent_id": "emma"}
+    {"type": "agent_done", "agent_id": "emma"}
+    {"type": "interrupt"}
+    {"type": "agent_interrupted", "agent_id": "emma", "by": "sofia"}
     {"type": "error", "message": "what went wrong"}
     {"type": "call_started", "call": {...}}
     {"type": "call_ended", "call_id": "..."}
@@ -20,12 +27,14 @@ Protocol:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
+import re
 import uuid as _uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -43,7 +52,6 @@ from ensemble.oracle.engine import OracleEngine
 from ensemble.utils import build_inputs, extract_reply, extract_text_from_content
 
 logger = logging.getLogger(__name__)
-
 
 class ConnectionManager:
     """Manages active WebSocket connections per conversation."""
@@ -75,6 +83,359 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+class VoiceSession:
+    """Manages the real-time voice pipeline for a single WebSocket connection.
+
+    Lifecycle:
+      1. start() — opens an STT session, begins listening for transcripts
+      2. feed_audio(pcm_b64) — forwards PCM chunks to STT
+      3. Background task listens for STT events → triggers agent responses
+      4. stop() — closes STT, cancels tasks
+    """
+
+    def __init__(
+        self,
+        ws: WebSocket,
+        conv: Conversation,
+        registry: AgentRegistry,
+        oracle: OracleEngine,
+        mistral_client: Any,
+    ) -> None:
+        self._ws = ws
+        self._conv = conv
+        self._registry = registry
+        self._oracle = oracle
+        self._mistral = mistral_client
+        self._stt_session = None
+        self._listen_task: asyncio.Task | None = None
+        self._response_task: asyncio.Task | None = None
+        self._active_tts = None  # TTSWebSocket for cancellation
+        self._active = False
+
+    async def start(self) -> None:
+        """Start the realtime STT session and begin listening."""
+        from ensemble.voice.stt import RealtimeSTTSession
+
+        logger.info("VoiceSession starting — opening STT connection")
+        self._stt_session = RealtimeSTTSession()
+        await self._stt_session.connect()
+        self._active = True
+        self._listen_task = asyncio.create_task(self._listen_for_transcripts())
+        logger.info("VoiceSession started — STT connected, listening for transcripts")
+
+    async def feed_audio(self, pcm_b64: str) -> None:
+        """Forward a PCM audio chunk to the STT session."""
+        if self._stt_session and self._active:
+            await self._stt_session.send_audio(pcm_b64)
+        else:
+            logger.debug("feed_audio called but STT session not active")
+
+    async def _listen_for_transcripts(self) -> None:
+        """Background task consuming STT events and triggering responses."""
+        if not self._stt_session:
+            return
+        try:
+            async for event in self._stt_session.iter_events():
+                if not self._active:
+                    break
+
+                if not event.is_final:
+                    # Partial transcript — show user their words in real-time
+                    await _send(self._ws, {
+                        "type": "partial_transcript",
+                        "text": event.text,
+                    })
+                else:
+                    # Committed transcript (VAD detected silence)
+                    if not event.text.strip():
+                        continue
+
+                    # If an agent is currently responding, interrupt it
+                    if self._response_task and not self._response_task.done():
+                        self._response_task.cancel()
+                        try:
+                            await self._response_task
+                        except asyncio.CancelledError:
+                            pass
+                        if self._active_tts:
+                            await self._active_tts.close()
+                            self._active_tts = None
+                        await _send(self._ws, {"type": "interrupt"})
+
+                    await _send(self._ws, {
+                        "type": "transcription",
+                        "text": event.text,
+                        "final": True,
+                    })
+
+                    # Start new response
+                    self._response_task = asyncio.create_task(
+                        self._trigger_response(event.text)
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Voice transcript listener error")
+
+    async def _trigger_response(self, text: str) -> None:
+        """Handle a committed transcript by routing to agent(s) with TTS."""
+        try:
+            if self._conv.type == ConversationType.DIRECT:
+                await self._direct_voice_response(text)
+            else:
+                await self._group_voice_response(text)
+        except asyncio.CancelledError:
+            logger.debug("Voice response cancelled (interrupted)")
+        except Exception:
+            logger.exception("Voice response failed")
+            await _send(self._ws, {"type": "error", "message": "Voice response failed"})
+
+    async def _direct_voice_response(self, text: str) -> None:
+        """Stream a direct agent response with TTS."""
+        from ensemble.voice.tts import TTSWebSocket
+
+        # Record user message
+        user_msg = Message(role=MessageRole.USER, content=text)
+        self._conv.messages.append(user_msg)
+
+        agent_id = self._conv.participant_agent_ids[0]
+        agent = self._registry.get(agent_id)
+        if not agent or not agent.mistral_agent_id:
+            await _send(self._ws, {"type": "error", "message": f"Agent {agent_id} not ready"})
+            return
+
+        await _send(self._ws, {"type": "agent_speaking", "agent_id": agent_id})
+
+        # Create an async generator from Mistral streaming
+        text_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        full_text = ""
+        msg_id = _uuid.uuid4().hex[:12]
+
+        async def _stream_agent_text() -> None:
+            nonlocal full_text
+            inputs = build_inputs(text, None)
+            mistral_conv_id = self._conv.mistral_conversation_ids.get(agent_id)
+
+            if mistral_conv_id:
+                stream = await self._mistral.beta.conversations.append_stream_async(
+                    conversation_id=mistral_conv_id,
+                    inputs=inputs,
+                    handoff_execution="client",
+                )
+            else:
+                stream = await self._mistral.beta.conversations.start_stream_async(
+                    agent_id=agent.mistral_agent_id,
+                    inputs=inputs,
+                    handoff_execution="client",
+                )
+
+            async for event in stream:
+                data = event.data
+                if hasattr(data, "conversation_id") and data.conversation_id:
+                    self._conv.mistral_conversation_ids[agent_id] = data.conversation_id
+                if hasattr(data, "content"):
+                    chunk_text = _extract_chunk_text(data)
+                    if chunk_text:
+                        full_text += chunk_text
+                        await text_queue.put(chunk_text)
+                        # Also send text chunk for the chat UI
+                        await _send(self._ws, {
+                            "type": "message_chunk",
+                            "agent_id": agent_id,
+                            "content": chunk_text,
+                            "message_id": msg_id,
+                        })
+            await text_queue.put(None)  # signal done
+
+        # Start text streaming task
+        text_task = asyncio.create_task(_stream_agent_text())
+
+        # Create text chunk async iterator
+        async def _text_iter() -> AsyncIterator[str]:
+            while True:
+                chunk = await text_queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+
+        # Stream through TTS
+        voice_id = agent.voice_id if agent else ""
+        tts = TTSWebSocket(voice_id=voice_id)
+        self._active_tts = tts
+        await tts.connect()
+
+        _sentence_end = re.compile(r"[.!?\n]")
+        buffer = ""
+
+        async def _feed_tts() -> None:
+            nonlocal buffer
+            try:
+                async for chunk in _text_iter():
+                    buffer += chunk
+                    while True:
+                        match = _sentence_end.search(buffer)
+                        if not match:
+                            break
+                        end = match.end()
+                        sentence = buffer[:end]
+                        buffer = buffer[end:]
+                        await tts.send_text(sentence)
+                if buffer.strip():
+                    await tts.send_text(buffer)
+                await tts.finish()
+            except asyncio.CancelledError:
+                pass
+
+        feed_task = asyncio.create_task(_feed_tts())
+
+        try:
+            async for audio_bytes in tts.iter_audio():
+                audio_b64 = base64.b64encode(audio_bytes).decode()
+                await _send(self._ws, {
+                    "type": "audio_chunk",
+                    "agent_id": agent_id,
+                    "data": audio_b64,
+                })
+        finally:
+            if not feed_task.done():
+                feed_task.cancel()
+                try:
+                    await feed_task
+                except asyncio.CancelledError:
+                    pass
+            if not text_task.done():
+                text_task.cancel()
+                try:
+                    await text_task
+                except asyncio.CancelledError:
+                    pass
+            await tts.close()
+            self._active_tts = None
+
+        # Record and complete
+        agent_msg = Message(role=MessageRole.AGENT, agent_id=agent_id, content=full_text)
+        self._conv.messages.append(agent_msg)
+
+        await _send(self._ws, {
+            "type": "message_complete",
+            "message": {
+                "id": msg_id,
+                "role": "assistant",
+                "agent_id": agent_id,
+                "content": full_text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        })
+        await _send(self._ws, {"type": "agent_done", "agent_id": agent_id})
+
+    async def _group_voice_response(self, text: str) -> None:
+        """Handle group conversation voice response with oracle orchestration and TTS."""
+        from ensemble.voice.tts import TTSWebSocket
+
+        msg_ids: dict[str, str] = {}
+
+        async for event_type, data in self._oracle.run_group_turn_streaming(
+            self._conv, text, None
+        ):
+            if event_type == "topic_set":
+                await _send(self._ws, {"type": "topic_set", "topic": data.get("topic", "")})
+
+            elif event_type == "oracle":
+                await _send(self._ws, {
+                    "type": "oracle_reasoning",
+                    "reasoning": data.get("reasoning", ""),
+                    "next_speaker": data.get("next_speaker"),
+                    "next_speaker_name": data.get("next_speaker_name"),
+                    "hint": data.get("hint", ""),
+                })
+
+            elif event_type == "turn_change":
+                agent_id = data.get("agent_id")
+                msg_ids[agent_id] = _uuid.uuid4().hex[:12]
+                await _send(self._ws, {"type": "turn_change", "agent_id": agent_id})
+                await _send(self._ws, {"type": "agent_speaking", "agent_id": agent_id})
+
+            elif event_type == "chunk":
+                # Buffer chunks for TTS — we handle TTS at message completion
+                agent_id = data.get("agent_id")
+                await _send(self._ws, {
+                    "type": "message_chunk",
+                    "agent_id": agent_id,
+                    "content": data.get("content", ""),
+                    "message_id": msg_ids.get(agent_id, ""),
+                })
+
+            elif event_type == "message":
+                msg = data  # Message object
+                agent_id = msg.agent_id
+                agent = self._registry.get(agent_id or "")
+                voice_id = agent.voice_id if agent else ""
+
+                # Synthesize the full agent response via TTS WebSocket
+                if msg.content and voice_id:
+                    tts = TTSWebSocket(voice_id=voice_id)
+                    self._active_tts = tts
+                    await tts.connect()
+                    await tts.send_text(msg.content)
+                    await tts.finish()
+
+                    try:
+                        async for audio_bytes in tts.iter_audio():
+                            audio_b64 = base64.b64encode(audio_bytes).decode()
+                            await _send(self._ws, {
+                                "type": "audio_chunk",
+                                "agent_id": agent_id,
+                                "data": audio_b64,
+                            })
+                    finally:
+                        await tts.close()
+                        self._active_tts = None
+
+                await _send(self._ws, {
+                    "type": "message_complete",
+                    "message": {
+                        "id": msg_ids.get(agent_id, _uuid.uuid4().hex[:12]),
+                        "role": "assistant",
+                        "agent_id": agent_id,
+                        "content": msg.content,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                })
+                await _send(self._ws, {"type": "agent_done", "agent_id": agent_id})
+
+            elif event_type == "summary":
+                await _send(self._ws, {
+                    "type": "summary",
+                    "content": data.get("content", ""),
+                })
+
+    async def stop(self) -> None:
+        """Close the voice session and clean up all resources."""
+        self._active = False
+
+        if self._response_task and not self._response_task.done():
+            self._response_task.cancel()
+            try:
+                await self._response_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._listen_task and not self._listen_task.done():
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._active_tts:
+            await self._active_tts.close()
+            self._active_tts = None
+
+        if self._stt_session:
+            await self._stt_session.close()
+            self._stt_session = None
+
+
 async def handle_conversation_ws(
     ws: WebSocket,
     conversation_id: str,
@@ -92,6 +453,7 @@ async def handle_conversation_ws(
         return
 
     await manager.connect(conversation_id, ws)
+    voice_session: VoiceSession | None = None
 
     try:
         while True:
@@ -108,6 +470,19 @@ async def handle_conversation_ws(
                 await _handle_message(ws, conv, msg, registry, oracle, mistral_client)
             elif msg_type == "audio":
                 await _handle_audio(ws, conv, msg, registry, oracle, mistral_client)
+            elif msg_type == "voice_state":
+                active = msg.get("active", False)
+                logger.info("voice_state received: active=%s", active)
+                if active and voice_session is None:
+                    voice_session = VoiceSession(ws, conv, registry, oracle, mistral_client)
+                    await voice_session.start()
+                elif not active and voice_session is not None:
+                    await voice_session.stop()
+                    voice_session = None
+            elif msg_type == "audio_stream":
+                data = msg.get("data", "")
+                if voice_session and data:
+                    await voice_session.feed_audio(data)
             elif msg_type == "start_call":
                 mode = msg.get("mode", "text")
                 call_data = {
@@ -120,6 +495,9 @@ async def handle_conversation_ws(
                 }
                 await _send(ws, {"type": "call_started", "call": call_data})
             elif msg_type == "end_call":
+                if voice_session:
+                    await voice_session.stop()
+                    voice_session = None
                 await _send(ws, {"type": "call_ended", "call_id": conversation_id})
             else:
                 await _send(ws, {"type": "error", "message": f"Unknown type: {msg_type}"})
@@ -127,6 +505,8 @@ async def handle_conversation_ws(
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for conversation %s", conversation_id)
     finally:
+        if voice_session:
+            await voice_session.stop()
         manager.disconnect(conversation_id, ws)
 
 
@@ -158,7 +538,9 @@ async def _handle_message(
         await _handle_direct_streaming(ws, conv, content, attachments, registry, mistral_client)
     else:
         # Group streaming handler (oracle) records the user message internally
-        await _handle_group_streaming(ws, conv, content, attachments, registry, oracle, mistral_client)
+        await _handle_group_streaming(
+            ws, conv, content, attachments, registry, oracle, mistral_client
+        )
 
 
 async def _handle_direct_streaming(
@@ -297,7 +679,10 @@ async def _handle_audio(
     await _send(ws, {"type": "transcription", "text": text})
 
     # 2. Get agent response (reuse message handler logic)
-    await _handle_message(ws, conv, {"content": text, "attachments": []}, registry, oracle, mistral_client)
+    await _handle_message(
+        ws, conv, {"content": text, "attachments": []},
+        registry, oracle, mistral_client,
+    )
 
     # 3. TTS for the last agent message
     last_agent_msg = None

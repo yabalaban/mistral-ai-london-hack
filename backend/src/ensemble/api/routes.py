@@ -14,15 +14,13 @@ router = APIRouter(prefix="/api")
 # These get set during app startup
 _registry = None
 _conversation_mgr = None
-_oracle = None
 _mistral_client = None
 
 
-def init(registry, conversation_mgr, oracle, mistral_client=None):
-    global _registry, _conversation_mgr, _oracle, _mistral_client
+def init(registry, conversation_mgr, oracle=None, mistral_client=None):
+    global _registry, _conversation_mgr, _mistral_client
     _registry = registry
     _conversation_mgr = conversation_mgr
-    _oracle = oracle
     _mistral_client = mistral_client
 
 
@@ -151,17 +149,7 @@ async def send_message(conversation_id: str, req: SendMessageRequest):
             raise HTTPException(400, str(e))
         return _message_to_dict(reply)
     else:
-        # Group conversation — oracle-driven
-        try:
-            replies = await _oracle.run_group_turn(
-                conv,
-                req.content,
-                req.attachments or None,
-                max_rounds=len(conv.participant_agent_ids),
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        return [_message_to_dict(r) for r in replies]
+        raise HTTPException(400, "Group messages must be sent via WebSocket")
 
 
 # ── Calls ──────────────────────────────────────────────────────────────────
@@ -225,10 +213,7 @@ async def send_message_with_image(
         )
         return _message_to_dict(reply)
     else:
-        replies = await _oracle.run_group_turn(
-            conv, content, attachments or None, max_rounds=len(conv.participant_agent_ids)
-        )
-        return [_message_to_dict(r) for r in replies]
+        raise HTTPException(400, "Group messages must be sent via WebSocket")
 
 
 # ── Slides ─────────────────────────────────────────────────────────────────

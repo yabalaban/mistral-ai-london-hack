@@ -13,7 +13,6 @@ from mistralai.models import (
 )
 
 from ensemble.agents.models import AgentProfile
-from ensemble.config import settings
 from ensemble.tools.slides import SLIDES_TOOL_SCHEMA
 
 BUILT_IN_TOOLS = {

@@ -1,4 +1,3 @@
-import { useState } from 'preact/hooks'
 import { useConversation } from '../../hooks/useConversation.ts'
 import { useVoice } from '../../hooks/useVoice.ts'
 import {
@@ -6,7 +5,7 @@ import {
   addOptimisticMessage,
 } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
-import { activeCall, callMode } from '../../state/call.ts'
+import { activeCall, callMode, isMicOn, partialTranscript } from '../../state/call.ts'
 import { startCall, endCall } from '../../api/client.ts'
 import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
@@ -15,8 +14,6 @@ import { ChatInput } from './ChatInput.tsx'
 import { AgentProfilePanel } from './AgentProfilePanel.tsx'
 import { CallControls } from '../group/CallControls.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
-import { LogsPanel } from '../shared/LogsPanel.tsx'
-import type { LogEntry } from '../shared/LogsPanel.tsx'
 import { generateId } from '../../utils/format.ts'
 import type { Attachment } from '../../types/index.ts'
 
@@ -28,12 +25,10 @@ interface ChatPageProps {
 }
 
 export function ChatPage({ id }: ChatPageProps) {
-  if (!id) return null
-
-  useConversation(id)
+  useConversation(id ?? '')
   const { toggleMic } = useVoice()
-  const [logsOpen, setLogsOpen] = useState(false)
-  const [logEntries] = useState<LogEntry[]>([])
+
+  if (!id) return null
 
   const conv = activeConversation.value
   const call = activeCall.value
@@ -72,6 +67,8 @@ export function ChatPage({ id }: ChatPageProps) {
     try {
       const call = await startCall(id)
       activeCall.value = call
+      callMode.value = 'voice'
+      toggleMic()
     } catch (err) {
       console.error('Failed to start call', err)
     }
@@ -82,12 +79,16 @@ export function ChatPage({ id }: ChatPageProps) {
       activeCall.value = null
       return
     }
+    if (isMicOn.value) {
+      toggleMic()
+    }
     try {
       await endCall(id)
     } catch (err) {
       console.error('Failed to end call', err)
     }
     activeCall.value = null
+    callMode.value = 'text'
   }
 
   const handleToggleMode = () => {
@@ -113,7 +114,7 @@ export function ChatPage({ id }: ChatPageProps) {
 
   return (
     <>
-      <Header title={title} onToggleLogs={() => setLogsOpen((o) => !o)}>
+      <Header title={title}>
         {!call ? (
           <button
             onClick={handleStartCall}
@@ -143,7 +144,14 @@ export function ChatPage({ id }: ChatPageProps) {
       ) : (
         <div class="flex-1 flex overflow-hidden">
           <div class="flex-1 flex flex-col min-w-0">
-            <MessageList messages={conv.messages} />
+            <div class="flex-1 overflow-hidden relative">
+              <MessageList messages={conv.messages} />
+              {call && mode === 'voice' && partialTranscript.value && (
+                <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-white/60 text-sm italic animate-pulse">
+                  🎤 {partialTranscript.value}
+                </div>
+              )}
+            </div>
             {(!call || mode === 'text') && (
               <ChatInput onSend={handleSend} placeholder={`Message ${agent?.name ?? 'agent'}...`} />
             )}
@@ -158,7 +166,6 @@ export function ChatPage({ id }: ChatPageProps) {
           {agent && <AgentProfilePanel agent={agent} />}
         </div>
       )}
-      <LogsPanel open={logsOpen} onClose={() => setLogsOpen(false)} entries={logEntries} />
     </>
   )
 }
