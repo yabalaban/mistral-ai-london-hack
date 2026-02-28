@@ -3,6 +3,8 @@ import { agents, agentsLoading } from '../../state/agents.ts'
 import { Header } from '../layout/Header.tsx'
 import { AgentCard } from './AgentCard.tsx'
 import { AgentDetail } from './AgentDetail.tsx'
+import { CreateAgentModal } from './CreateAgentModal.tsx'
+import { NewGroupModal } from './NewGroupModal.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
 import { Button } from '../shared/Button.tsx'
 import type { Agent } from '../../types/index.ts'
@@ -14,9 +16,16 @@ const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
 
 export function RosterPage() {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null)
+  const [showCreateAgent, setShowCreateAgent] = useState(false)
+  const [showNewGroup, setShowNewGroup] = useState(false)
 
-  const startGroupCall = async () => {
-    const agentIds = agents.value.slice(0, 3).map((a) => a.id)
+  const handleCreateAgent = (agent: Agent) => {
+    agents.value = [...agents.value, agent]
+    setShowCreateAgent(false)
+  }
+
+  const handleCreateGroup = async (agentIds: string[]) => {
+    setShowNewGroup(false)
     if (USE_MOCKS) {
       const mockConv = {
         id: `group-${Date.now()}`,
@@ -54,7 +63,8 @@ export function RosterPage() {
   return (
     <>
       <Header title="Agents">
-        <Button onClick={startGroupCall}>New Group Call</Button>
+        <Button variant="secondary" onClick={() => setShowNewGroup(true)}>New Group Chat</Button>
+        <Button onClick={() => setShowCreateAgent(true)}>Add Agent</Button>
       </Header>
       <div class="flex-1 overflow-y-auto p-8">
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 max-w-5xl">
@@ -69,6 +79,12 @@ export function RosterPage() {
       </div>
       {selectedAgent && (
         <AgentDetail agent={selectedAgent} onClose={() => setSelectedAgent(null)} />
+      )}
+      {showCreateAgent && (
+        <CreateAgentModal onClose={() => setShowCreateAgent(false)} onCreate={handleCreateAgent} />
+      )}
+      {showNewGroup && (
+        <NewGroupModal onClose={() => setShowNewGroup(false)} onCreate={handleCreateGroup} />
       )}
     </>
   )
