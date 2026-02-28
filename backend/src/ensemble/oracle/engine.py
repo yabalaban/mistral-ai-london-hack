@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, cast
 
 from mistralai import Mistral
@@ -41,6 +42,25 @@ def _is_pass(text: str) -> bool:
     """Check if agent output is a pass (case-insensitive, flexible)."""
     s = text.strip().lower()
     return s in PASS_VARIANTS or s.startswith("[pass]")
+
+
+_REPLY_PREFIX_RE = re.compile(r"^>>([a-f0-9]{8,12})\s*\n?", re.IGNORECASE)
+
+
+def _parse_reply_target(text: str, valid_ids: set[str]) -> tuple[str | None, str]:
+    """Extract >>msg_id prefix. Returns (reply_to_id | None, cleaned_text).
+
+    Always strips the >> prefix if found (even if ID is invalid).
+    """
+    match = _REPLY_PREFIX_RE.match(text)
+    if not match:
+        return None, text
+    target_id = match.group(1)
+    cleaned = text[match.end():]
+    if target_id not in valid_ids:
+        return None, cleaned  # strip prefix, don't use invalid ID
+    return target_id, cleaned
+
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
@@ -80,6 +100,9 @@ AGENT_CONTEXT_TEMPLATE = """\
 {hint_line}
 
 {context}
+
+Start your reply with >>ID (the ID of the message you're responding to).
+Pick the most relevant message. Default to the user's message ID if unsure.
 
 Reply naturally (1-2 sentences, like a human in a group chat). \
 Don't repeat what others already said.
@@ -305,11 +328,11 @@ class OracleEngine:
         lines = []
         for msg in messages:
             if msg.role == MessageRole.USER:
-                lines.append(f"**User**: {msg.content}")
+                lines.append(f"[{msg.id}] **User**: {msg.content}")
             elif msg.role == MessageRole.AGENT and msg.agent_id:
                 agent = self._registry.get(msg.agent_id)
                 name = agent.name if agent else msg.agent_id
-                lines.append(f"**{name}**: {msg.content[:400]}")
+                lines.append(f"[{msg.id}] **{name}**: {msg.content[:400]}")
         return lines
 
     def _build_agent_prompt(
@@ -547,6 +570,8 @@ class OracleEngine:
                     content = agent_content_map.get(ev_data["agent_id"])
                     if content:
                         entry["content"] = content
+                    if ev_data.get("reply_to_id"):
+                        entry["reply_to_id"] = ev_data["reply_to_id"]
                     round_record.agent_responses.append(entry)
 
             for aid in responded_ids:
@@ -615,7 +640,7 @@ class OracleEngine:
 
         async def _run_agent(aid: str) -> None:
             try:
-                full_text, flushed = await self._stream_to_queue(
+                full_text, flushed, agent_reply_to = await self._stream_to_queue(
                     queue, conversation, aid, voice_mode, reply_to_id,
                     hint=hint_map.get(aid),
                 )
@@ -626,7 +651,7 @@ class OracleEngine:
                         role=MessageRole.AGENT,
                         agent_id=aid,
                         content=full_text,
-                        reply_to_id=reply_to_id,
+                        reply_to_id=agent_reply_to,
                     )
                     conversation.messages.append(msg)
                     await queue.put(("message", msg))
@@ -634,6 +659,7 @@ class OracleEngine:
                         "agent_id": aid,
                         "agent_name": name,
                         "verdict": "responded",
+                        "reply_to_id": agent_reply_to,
                     }))
                 else:
                     await queue.put(("agent_verdict", {
@@ -675,6 +701,7 @@ class OracleEngine:
         """Agents respond one-by-one, each seeing prior responses."""
         hint_map = hint_map or {}
         current_reply_to = reply_to_id
+        valid_ids = {msg.id for msg in conversation.messages}
 
         for aid in agent_ids:
             agent = self._registry.get(aid)
@@ -689,7 +716,8 @@ class OracleEngine:
             full_text = ""
             buffered: list[str] = []
             flushed = False
-            pass_len = 7  # buffer enough chars to detect pass variants
+            prefix_len = 16  # >>hex12\n — enough for pass and reply prefix
+            agent_reply_to = current_reply_to  # fallback
 
             agent_inputs = prompt
             if voice_mode:
@@ -731,15 +759,24 @@ class OracleEngine:
                             full_text += text
                             if not flushed:
                                 buffered.append(text)
-                                if len(full_text) >= pass_len:
+                                if len(full_text) >= prefix_len:
                                     if _is_pass(full_text):
                                         continue
+                                    # Parse >>ID prefix
+                                    target, cleaned = _parse_reply_target(
+                                        full_text, valid_ids
+                                    )
+                                    if target:
+                                        agent_reply_to = target
+                                    if cleaned != full_text:
+                                        full_text = cleaned
+                                        buffered = [cleaned]
                                     flushed = True
                                     yield (
                                         "turn_change",
                                         {
                                             "agent_id": aid,
-                                            "reply_to_id": current_reply_to,
+                                            "reply_to_id": agent_reply_to,
                                         },
                                     )
                                     for c in buffered:
@@ -765,12 +802,21 @@ class OracleEngine:
                         })
                         continue
                     if full_text:
+                        # Parse >>ID prefix from short response
+                        target, cleaned = _parse_reply_target(
+                            full_text, valid_ids
+                        )
+                        if target:
+                            agent_reply_to = target
+                        if cleaned != full_text:
+                            full_text = cleaned
+                            buffered = [cleaned]
                         flushed = True
                         yield (
                             "turn_change",
                             {
                                 "agent_id": aid,
-                                "reply_to_id": current_reply_to,
+                                "reply_to_id": agent_reply_to,
                             },
                         )
                         for c in buffered:
@@ -784,14 +830,16 @@ class OracleEngine:
                         role=MessageRole.AGENT,
                         agent_id=aid,
                         content=full_text,
-                        reply_to_id=current_reply_to,
+                        reply_to_id=agent_reply_to,
                     )
                     conversation.messages.append(msg)
+                    valid_ids.add(msg.id)
                     yield ("message", msg)
                     yield ("agent_verdict", {
                         "agent_id": aid,
                         "agent_name": agent.name,
                         "verdict": "responded",
+                        "reply_to_id": agent_reply_to,
                     })
                     current_reply_to = msg.id
 
@@ -808,21 +856,23 @@ class OracleEngine:
         voice_mode: bool,
         reply_to_id: str | None,
         hint: str | None = None,
-    ) -> tuple[str, bool]:
-        """Stream one agent into a queue, buffering to detect [PASS].
+    ) -> tuple[str, bool, str | None]:
+        """Stream one agent into a queue, buffering to detect [PASS] / >>ID.
 
-        Returns (full_text, flushed).
+        Returns (full_text, flushed, resolved_reply_to_id).
         """
         agent = self._registry.get(agent_id)
         if not agent or not agent.mistral_agent_id:
-            return "", False
+            return "", False, reply_to_id
 
         prompt = self._build_agent_prompt(conversation, agent_id, hint=hint)
         mistral_conv_id = conversation.mistral_conversation_ids.get(agent_id)
         full_text = ""
         buffered: list[str] = []
         flushed = False
-        pass_len = 7  # buffer enough chars to detect pass variants
+        prefix_len = 16  # >>hex12\n — enough for pass and reply prefix
+        valid_ids = {msg.id for msg in conversation.messages}
+        agent_reply_to = reply_to_id  # fallback
 
         agent_inputs = prompt
         if voice_mode:
@@ -858,15 +908,24 @@ class OracleEngine:
                     full_text += text
                     if not flushed:
                         buffered.append(text)
-                        if len(full_text) >= pass_len:
+                        if len(full_text) >= prefix_len:
                             if _is_pass(full_text):
                                 continue
+                            # Parse >>ID prefix
+                            target, cleaned = _parse_reply_target(
+                                full_text, valid_ids
+                            )
+                            if target:
+                                agent_reply_to = target
+                            if cleaned != full_text:
+                                full_text = cleaned
+                                buffered = [cleaned]
                             flushed = True
                             await queue.put((
                                 "turn_change",
                                 {
                                     "agent_id": agent_id,
-                                    "reply_to_id": reply_to_id,
+                                    "reply_to_id": agent_reply_to,
                                 },
                             ))
                             for c in buffered:
@@ -885,12 +944,21 @@ class OracleEngine:
         if not flushed:
             if _is_pass(full_text):
                 logger.info("Agent %s passed (parallel)", agent_id)
-                return full_text, False
+                return full_text, False, agent_reply_to
             if full_text:
+                # Parse >>ID prefix from short response
+                target, cleaned = _parse_reply_target(
+                    full_text, valid_ids
+                )
+                if target:
+                    agent_reply_to = target
+                if cleaned != full_text:
+                    full_text = cleaned
+                    buffered = [cleaned]
                 flushed = True
                 await queue.put((
                     "turn_change",
-                    {"agent_id": agent_id, "reply_to_id": reply_to_id},
+                    {"agent_id": agent_id, "reply_to_id": agent_reply_to},
                 ))
                 for c in buffered:
                     await queue.put((
@@ -898,7 +966,7 @@ class OracleEngine:
                         {"agent_id": agent_id, "content": c},
                     ))
 
-        return full_text, flushed
+        return full_text, flushed, agent_reply_to
 
     # ── Single agent (directed messages) ─────────────────────────────────
 
@@ -917,6 +985,10 @@ class OracleEngine:
         prompt = self._build_agent_prompt(conversation, agent_id)
         mistral_conv_id = conversation.mistral_conversation_ids.get(agent_id)
         full_text = ""
+        buffered: list[str] = []
+        flushed = False
+        prefix_len = 16
+        valid_ids = {msg.id for msg in conversation.messages}
 
         try:
             agent_inputs = prompt
@@ -956,10 +1028,45 @@ class OracleEngine:
                     )
                     if text:
                         full_text += text
-                        yield ("chunk", {
-                            "agent_id": agent_id,
-                            "content": text,
-                        })
+                        if not flushed:
+                            buffered.append(text)
+                            if len(full_text) >= prefix_len:
+                                target, cleaned = _parse_reply_target(
+                                    full_text, valid_ids
+                                )
+                                if target:
+                                    reply_to_id = target
+                                if cleaned != full_text:
+                                    full_text = cleaned
+                                    buffered = [cleaned]
+                                flushed = True
+                                for c in buffered:
+                                    yield ("chunk", {
+                                        "agent_id": agent_id,
+                                        "content": c,
+                                    })
+                                buffered.clear()
+                        else:
+                            yield ("chunk", {
+                                "agent_id": agent_id,
+                                "content": text,
+                            })
+
+            # Handle unflushed buffer
+            if not flushed and full_text:
+                target, cleaned = _parse_reply_target(
+                    full_text, valid_ids
+                )
+                if target:
+                    reply_to_id = target
+                if cleaned != full_text:
+                    full_text = cleaned
+                    buffered = [cleaned]
+                for c in buffered:
+                    yield ("chunk", {
+                        "agent_id": agent_id,
+                        "content": c,
+                    })
 
             if full_text:
                 msg = Message(
