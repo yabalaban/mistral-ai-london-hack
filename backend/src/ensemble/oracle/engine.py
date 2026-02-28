@@ -7,6 +7,7 @@ from mistralai import Mistral
 
 from ensemble.agents.registry import AgentRegistry
 from ensemble.config import settings
+from ensemble.conversations.manager import _handle_function_calls
 from ensemble.conversations.models import (
     Attachment,
     Conversation,
@@ -148,6 +149,11 @@ class OracleEngine:
                     inputs=agent_prompt,
                 )
             conversation.mistral_conversation_ids[next_id] = response.conversation_id
+
+            # Handle function calls
+            response = await _handle_function_calls(
+                self._client, response, conversation, next_id
+            )
 
             reply_text = _extract_reply(response)
             agent_msg = Message(

@@ -215,6 +215,28 @@ async def send_message_with_image(
         ]
 
 
+# ── Slides ─────────────────────────────────────────────────────────────────
+
+
+@router.get("/slides")
+async def list_slides():
+    """List all generated presentations."""
+    from ensemble.tools.slides import list_presentations
+
+    return {"presentations": list_presentations()}
+
+
+@router.get("/slides/{presentation_id}")
+async def get_slides(presentation_id: str):
+    """View a generated presentation (returns HTML)."""
+    from ensemble.tools.slides import get_presentation
+
+    html_content = get_presentation(presentation_id)
+    if not html_content:
+        raise HTTPException(404, "Presentation not found")
+    return Response(content=html_content, media_type="text/html")
+
+
 # ── Voice ──────────────────────────────────────────────────────────────────
 
 

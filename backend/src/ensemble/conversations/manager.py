@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from mistralai import Mistral
@@ -12,8 +13,14 @@ from ensemble.conversations.models import (
     Message,
     MessageRole,
 )
+from ensemble.tools.slides import create_slides
 
 logger = logging.getLogger(__name__)
+
+# Registry of callable tools
+TOOL_HANDLERS = {
+    "create_slides": create_slides,
+}
 
 
 class ConversationManager:
@@ -77,19 +84,27 @@ class ConversationManager:
         inputs = _build_inputs(content, attachments)
 
         # Start or continue Mistral conversation
+        # Use client handoff so we handle function calls locally
         mistral_conv_id = conv.mistral_conversation_ids.get(agent_id)
         if mistral_conv_id:
             response = await self._client.beta.conversations.append_async(
                 conversation_id=mistral_conv_id,
                 inputs=inputs,
+                handoff_execution="client",
             )
         else:
             response = await self._client.beta.conversations.start_async(
                 agent_id=agent.mistral_agent_id,
                 inputs=inputs,
+                handoff_execution="client",
             )
 
         conv.mistral_conversation_ids[agent_id] = response.conversation_id
+
+        # Handle function calls (tool use)
+        response = await _handle_function_calls(
+            self._client, response, conv, agent_id
+        )
 
         # Extract assistant reply
         reply_text = _extract_reply(response)
@@ -103,6 +118,68 @@ class ConversationManager:
 
     def list_all(self) -> list[Conversation]:
         return list(self._conversations.values())
+
+
+async def _handle_function_calls(client, response, conv, agent_id, max_rounds: int = 3):
+    """If the response contains function calls, execute them and continue.
+
+    Loops up to max_rounds in case the agent chains multiple tool calls.
+    """
+    from mistralai.models.functionresultentry import FunctionResultEntry
+
+    for _ in range(max_rounds):
+        func_calls = [
+            o for o in response.outputs
+            if hasattr(o, "type") and getattr(o, "type", None) == "function.call"
+        ]
+        if not func_calls:
+            return response
+
+        # Execute each function call
+        results = []
+        for fc in func_calls:
+            fn_name = fc.name
+            try:
+                raw_args = fc.arguments
+                # arguments can be: str (JSON), pydantic model, or dict
+                if isinstance(raw_args, str):
+                    args = json.loads(raw_args)
+                elif hasattr(raw_args, "model_dump"):
+                    args = raw_args.model_dump()
+                    # model_dump may produce nested strings; re-parse if needed
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                elif isinstance(raw_args, dict):
+                    args = raw_args
+                else:
+                    args = json.loads(str(raw_args))
+
+                handler = TOOL_HANDLERS.get(fn_name)
+                if handler:
+                    result = handler(**args)
+                    result_str = json.dumps(result)
+                    logger.info("Tool %s returned: %s", fn_name, result_str[:200])
+                else:
+                    result_str = json.dumps({"error": f"Unknown tool: {fn_name}"})
+                    logger.warning("Unknown tool called: %s", fn_name)
+            except Exception:
+                logger.exception("Tool %s execution failed", fn_name)
+                result_str = json.dumps({"error": f"Tool {fn_name} failed"})
+
+            results.append(FunctionResultEntry(
+                tool_call_id=fc.tool_call_id,
+                result=result_str,
+            ))
+
+        # Send results back to the conversation
+        conv_id = response.conversation_id
+        response = await client.beta.conversations.append_async(
+            conversation_id=conv_id,
+            inputs=results,
+        )
+        conv.mistral_conversation_ids[agent_id] = response.conversation_id
+
+    return response
 
 
 def _build_inputs(

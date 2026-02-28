@@ -7,16 +7,18 @@ from pathlib import Path
 from mistralai import Mistral
 from mistralai.models import (
     CodeInterpreterTool,
+    FunctionTool,
     WebSearchTool,
-    DocumentLibraryTool,
 )
 
 from ensemble.agents.models import AgentProfile
 from ensemble.config import settings
+from ensemble.tools.slides import SLIDES_TOOL_SCHEMA
 
 BUILT_IN_TOOLS = {
     "code_interpreter": CodeInterpreterTool(type="code_interpreter"),
     "web_search": WebSearchTool(type="web_search"),
+    "create_slides": FunctionTool(**SLIDES_TOOL_SCHEMA),
 }
 
 logger = logging.getLogger(__name__)

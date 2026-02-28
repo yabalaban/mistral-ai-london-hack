@@ -30,6 +30,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from ensemble.agents.registry import AgentRegistry
+from ensemble.conversations.manager import _handle_function_calls
 from ensemble.conversations.models import (
     Attachment,
     Conversation,
@@ -285,12 +286,17 @@ async def _stream_agent_response(
     Sends incremental chunks to the WebSocket and returns the full text.
     Uses start_stream_async / append_stream_async for real-time streaming.
 
+    If a function call is detected, falls back to non-streaming to handle
+    tool execution and re-prompting.
+
     Event types from Mistral:
       - ResponseStartedEvent: contains conversation_id
       - MessageOutputEvent: contains content (text chunk), agent_id, role
+      - FunctionCallEvent: agent wants to call a tool
       - ResponseDoneEvent: contains usage stats
     """
     full_text = ""
+    has_function_call = False
 
     if mistral_conv_id:
         stream = await mistral_client.beta.conversations.append_stream_async(
@@ -310,6 +316,11 @@ async def _stream_agent_response(
         if hasattr(data, "conversation_id") and data.conversation_id:
             conv.mistral_conversation_ids[agent_id] = data.conversation_id
 
+        # Detect function calls
+        dtype = type(data).__name__
+        if "FunctionCall" in dtype:
+            has_function_call = True
+
         # MessageOutputEvent — stream text chunks
         if hasattr(data, "content"):
             text = _extract_chunk_text(data)
@@ -322,6 +333,33 @@ async def _stream_agent_response(
                     "done": False,
                 })
 
+    # If there was a function call, handle it via non-streaming path
+    if has_function_call:
+        mistral_conv_id = conv.mistral_conversation_ids.get(agent_id)
+        if mistral_conv_id:
+            # Get the conversation history to find the function call
+            response = await mistral_client.beta.conversations.get_async(
+                conversation_id=mistral_conv_id,
+            )
+            # Re-fetch as a non-streaming append to get function call details
+            # Actually, let's use the non-streaming approach for tool calls
+            response = await mistral_client.beta.conversations.append_async(
+                conversation_id=mistral_conv_id,
+                inputs="Please proceed with the tool call.",
+            )
+            response = await _handle_function_calls(
+                mistral_client, response, conv, agent_id
+            )
+            tool_reply = _extract_chunk_text_from_response(response)
+            if tool_reply:
+                full_text = tool_reply
+                await _send(ws, {
+                    "type": "agent_message",
+                    "agent_id": agent_id,
+                    "content": tool_reply,
+                    "done": False,
+                })
+
     # Send done signal with full accumulated text
     await _send(ws, {
         "type": "agent_message",
@@ -331,6 +369,14 @@ async def _stream_agent_response(
     })
 
     return full_text
+
+
+def _extract_chunk_text_from_response(response) -> str:
+    """Extract text from a non-streaming conversation response."""
+    for output in response.outputs:
+        if hasattr(output, "content") and hasattr(output, "role"):
+            return _extract_chunk_text(output)
+    return ""
 
 
 def _build_inputs(content: str, attachments: list[Attachment]) -> str | list[dict]:
