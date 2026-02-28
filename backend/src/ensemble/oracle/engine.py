@@ -35,20 +35,25 @@ MAX_SPEAKERS_PER_TURN = 5
 ORACLE_SYSTEM = """\
 You are the Oracle — an invisible moderator orchestrating a group discussion between AI agents.
 
+## Thread Topic
+{topic}
+
+Every message from the user relates to this topic. Your job is to keep the discussion focused on it. If the conversation drifts, steer it back. All your speaker picks and directives should serve this topic.
+
 ## Participants
 {participants}
 
 ## Your Job
 Analyze the conversation and decide:
 1. **Who** should speak next (or if the round is done)
-2. **What** angle they should take — be specific, not generic
+2. **What** angle they should take — be specific and tied to the thread topic
 3. **Why** — your reasoning is shown to users as a live transcript
 
 ## Rules
 - Never pick the same speaker twice in a row
 - Prefer speakers who haven't contributed yet this round
 - If a topic needs a specific expertise, pick the specialist
-- Give pointed directives: not "share your thoughts" but "challenge Emma's architecture choice" or "estimate the market size"
+- Give pointed directives tied to the thread topic: not "share your thoughts" but "challenge Emma's architecture choice" or "estimate the market size for this idea"
 - If all relevant perspectives are covered, set `done: true` to end the round
 - Keep reasoning to 1-2 punchy sentences — this is a live feed, not an essay
 
@@ -65,13 +70,14 @@ Set `done: true` and `next_speaker: null` when the round is complete.\
 
 AGENT_CONTEXT_TEMPLATE = """\
 [Group Discussion — you're {name}]
+[Thread topic: {topic}]
 
 What's been said:
 {context}
 
 [Moderator → {name}]: {hint}
 
-Respond in 2-3 sentences. Be direct and in character. Build on or challenge what others said — don't repeat their points.\
+Respond in 2-3 sentences. Be direct and in character. Build on or challenge what others said — don't repeat their points. Stay on topic.\
 """
 
 
@@ -107,7 +113,22 @@ class OracleEngine:
         recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
         history_lines = self._format_history(recent)
 
-        system = ORACLE_SYSTEM.format(participants="\n".join(participants))
+        # Extract or use existing topic
+        topic = conversation.topic
+        if not topic:
+            # First user message sets the topic
+            for msg in conversation.messages:
+                if msg.role == MessageRole.USER:
+                    topic = msg.content
+                    conversation.topic = topic
+                    break
+            if not topic:
+                topic = "General discussion"
+
+        system = ORACLE_SYSTEM.format(
+            topic=topic,
+            participants="\n".join(participants),
+        )
 
         messages = [{"role": "system", "content": system}]
         if history_lines:
@@ -169,8 +190,11 @@ class OracleEngine:
         agent = self._registry.get(agent_id)
         name = agent.name if agent else agent_id
 
+        topic = conversation.topic or "General discussion"
+
         return AGENT_CONTEXT_TEMPLATE.format(
             name=name,
+            topic=topic,
             context="\n".join(context_lines) if context_lines else "(No messages yet)",
             hint=hint,
         )

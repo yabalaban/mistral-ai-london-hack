@@ -56,6 +56,7 @@ class Conversation(BaseModel):
     participant_agent_ids: list[str]
     messages: list[Message] = []
     mistral_conversation_ids: dict[str, str] = {}  # agent_id -> mistral conv id
+    topic: str | None = None  # Thread topic — set from first user message
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
