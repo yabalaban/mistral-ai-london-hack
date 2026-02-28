@@ -8,6 +8,7 @@ from mistralai import Mistral
 from mistralai.models import (
     CodeInterpreterTool,
     FunctionTool,
+    ImageGenerationTool,
     WebSearchTool,
 )
 
@@ -18,6 +19,7 @@ from ensemble.tools.slides import SLIDES_TOOL_SCHEMA
 BUILT_IN_TOOLS = {
     "code_interpreter": CodeInterpreterTool(type="code_interpreter"),
     "web_search": WebSearchTool(type="web_search"),
+    "image_generation": ImageGenerationTool(type="image_generation"),
     "create_slides": FunctionTool(**SLIDES_TOOL_SCHEMA),
 }
 

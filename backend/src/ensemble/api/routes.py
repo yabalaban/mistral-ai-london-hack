@@ -237,6 +237,21 @@ async def get_slides(presentation_id: str):
     return Response(content=html_content, media_type="text/html")
 
 
+@router.get("/slides/{presentation_id}/pdf")
+async def get_slides_pdf(presentation_id: str):
+    """Download a generated presentation as PDF."""
+    from ensemble.tools.slides import get_pdf
+
+    pdf_bytes = get_pdf(presentation_id)
+    if not pdf_bytes:
+        raise HTTPException(404, "PDF not found")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="slides-{presentation_id}.pdf"'},
+    )
+
+
 # ── Voice ──────────────────────────────────────────────────────────────────
 
 
