@@ -116,14 +116,8 @@ class OracleEngine:
         # Extract or use existing topic
         topic = conversation.topic
         if not topic:
-            # First user message sets the topic
-            for msg in conversation.messages:
-                if msg.role == MessageRole.USER:
-                    topic = msg.content
-                    conversation.topic = topic
-                    break
-            if not topic:
-                topic = "General discussion"
+            topic = await self._extract_topic(conversation)
+            conversation.topic = topic
 
         system = ORACLE_SYSTEM.format(
             topic=topic,
@@ -168,6 +162,53 @@ class OracleEngine:
                 if aid != last_speaker and aid not in (speakers_this_round or []):
                     return aid, "Share your thoughts", "Fallback — rotating speakers", False
             return None, "", "All participants have spoken", True
+
+    async def _extract_topic(self, conversation: Conversation) -> str:
+        """Extract the thread topic from early user messages.
+
+        Looks at up to the first 3 user messages and picks the most
+        substantive one as the topic. Skips greetings like 'hey' or 'hi'.
+        Falls back to an LLM call if ambiguous.
+        """
+        user_msgs = [
+            msg.content for msg in conversation.messages
+            if msg.role == MessageRole.USER
+        ][:3]
+
+        if not user_msgs:
+            return "General discussion"
+
+        # Filter out trivial greetings
+        substantive = [
+            m for m in user_msgs
+            if len(m.split()) > 3  # more than 3 words
+        ]
+
+        if len(substantive) == 1:
+            return substantive[0]
+
+        if not substantive:
+            # All messages are short/greetings — no real topic yet
+            return "General discussion"
+
+        # Multiple substantive messages — ask the LLM to pick the topic
+        try:
+            response = await self._client.chat.complete_async(
+                model=settings.oracle_model,
+                messages=[
+                    {"role": "system", "content": (
+                        "Extract the main discussion topic from these user messages. "
+                        "Return JSON: {\"topic\": \"<1 sentence summary of what the thread is about>\"}"
+                    )},
+                    {"role": "user", "content": "\n".join(f"- {m}" for m in substantive)},
+                ],
+                response_format={"type": "json_object"},
+            )
+            data = json.loads(response.choices[0].message.content.strip())
+            return data.get("topic", substantive[0])
+        except Exception:
+            logger.exception("Topic extraction failed")
+            return substantive[0]
 
     def _format_history(self, messages: list[Message]) -> list[str]:
         """Format recent messages for oracle/agent context."""
