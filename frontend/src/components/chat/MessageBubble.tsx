@@ -3,6 +3,7 @@ import { agentMap } from '../../state/agents.ts'
 import { Avatar } from '../shared/Avatar.tsx'
 import { formatTime } from '../../utils/format.ts'
 import { StreamingText } from './StreamingText.tsx'
+import { Markdown } from './Markdown.tsx'
 
 interface MessageBubbleProps {
   message: Message
@@ -59,7 +60,7 @@ export function MessageBubble({ message, isStreaming = false }: MessageBubblePro
           {isStreaming ? (
             <StreamingText text={message.content} />
           ) : (
-            <span class="whitespace-pre-wrap">{message.content}</span>
+            <Markdown content={message.content} />
           )}
         </div>
       </div>
