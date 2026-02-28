@@ -33,50 +33,46 @@ MAX_CONTEXT_MESSAGES = 15
 MAX_SPEAKERS_PER_TURN = 7
 
 ORACLE_SYSTEM = """\
-You are the Oracle — an invisible moderator orchestrating a group discussion between AI agents.
+You are the Oracle — invisible moderator for a group thread.
 
 ## Thread Topic
 {topic}
 
-Every message from the user relates to this topic. Your job is to keep the discussion focused on it. If the conversation drifts, steer it back. All your speaker picks and directives should serve this topic.
-
 ## Participants
 {participants}
 
-## Your Job
-Analyze the conversation and decide:
-1. **Who** should speak next (or if the round is done)
-2. **What** angle they should take — be specific and tied to the thread topic
-3. **Why** — your reasoning is shown to users as a live transcript
+## How to Moderate
+This is a natural group thread — like humans chatting. NOT a panel discussion.
 
-## Rules
-- Never pick the same speaker twice in a row
-- Prefer speakers who haven't contributed yet this round
-- If a topic needs a specific expertise, pick the specialist
-- Give pointed directives tied to the thread topic: not "share your thoughts" but "challenge Emma's architecture choice" or "estimate the market size for this idea"
-- If all relevant perspectives are covered, set `done: true` to end the round
-- Keep reasoning to 1-2 punchy sentences — this is a live feed, not an essay
+**Greetings/small talk** ("hey", "what's up"): Pick ONE person to respond casually. Set done=true after. Don't make everyone say hi — that's cringe.
+
+**Real questions/topics**: Pick the most relevant person. Only add more speakers if they have something genuinely different to add. 2-3 speakers max per round usually. Not everyone needs to talk every time.
+
+**Directives**: Be specific. "Challenge Emma's scaling assumption" not "share your thoughts". Keep the thread focused on the topic.
+
+**When to stop** (done=true):
+- After greetings — one casual reply is enough
+- When the key perspectives are covered — don't force participation
+- When someone gave a complete answer and nobody would naturally add to it
 
 ## Response Format (JSON)
 {{
-  "reasoning": "<why this person, why now — 1-2 sentences>",
+  "reasoning": "<1 sentence — why this person>",
   "next_speaker": "<agent_id or null if done>",
-  "hint": "<specific directive for the speaker>",
+  "hint": "<specific directive or 'casual' for small talk>",
   "done": false
 }}
-
-Set `done: true` and `next_speaker: null` when the round is complete.\
+\
 """
 
 AGENT_CONTEXT_TEMPLATE = """\
-[Group chat — you're {name}]
-[Topic: {topic}]
+[Thread — you're {name}] [Topic: {topic}]
 
 {context}
 
 [→ {name}]: {hint}
 
-Keep it tight — 2-3 sentences. Don't repeat what others said. Be yourself.\
+Reply like a human in a group chat. 1-3 sentences. No walls of text. No bullet points unless specifically asked. Don't repeat others.\
 """
 
 
@@ -179,11 +175,25 @@ class OracleEngine:
         if not user_msgs:
             return "General discussion"
 
-        # Filter out trivial greetings
-        substantive = [
-            m for m in user_msgs
-            if len(m.split()) > 3  # more than 3 words
-        ]
+        # Filter out greetings and small talk
+        GREETING_PATTERNS = {
+            "hi", "hey", "hello", "yo", "sup", "whats up", "what's up",
+            "how are you", "how's it going", "howdy", "hiya", "good morning",
+            "good evening", "good afternoon", "hey folks", "hi everyone",
+            "hey everyone", "hey guys", "hey team", "what up",
+        }
+        substantive = []
+        for m in user_msgs:
+            normalized = m.lower().strip().rstrip("?!.,")
+            if normalized in GREETING_PATTERNS:
+                continue
+            # Also skip if it's just a greeting with filler
+            words = normalized.split()
+            if len(words) <= 5 and any(g in normalized for g in ("hey", "hi ", "hello", "what's up", "whats up", "sup")):
+                continue
+            if len(words) < 4:
+                continue
+            substantive.append(m)
 
         if len(substantive) == 1:
             return substantive[0]
