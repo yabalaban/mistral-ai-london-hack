@@ -308,6 +308,10 @@ class OracleEngine:
         if directed_agent:
             agent = self._registry.get(directed_agent)
             if agent and agent.mistral_agent_id:
+                yield ("oracle_start", {
+                    "directed": True,
+                    "directed_agent": directed_agent,
+                })
                 yield ("oracle", {
                     "reasoning": f"{agent.name} was addressed directly",
                     "speakers": [{
@@ -315,6 +319,8 @@ class OracleEngine:
                         "agent_name": agent.name,
                         "hint": "directed",
                     }],
+                    "round": 1,
+                    "mode": "directed",
                 })
                 yield ("turn_change", {
                     "agent_id": directed_agent,
@@ -325,6 +331,7 @@ class OracleEngine:
                     reply_to_id=user_message_id,
                 ):
                     yield event
+                yield ("oracle_end", {})
             return
 
         # --- CLASSIFY ---
@@ -332,6 +339,11 @@ class OracleEngine:
         agent_ids = self._get_ready_agents(conversation)
         if not agent_ids:
             return
+
+        yield ("oracle_start", {
+            "directed": False,
+            "directed_agent": None,
+        })
 
         speakers_so_far: list[str] = []
         last_agent_message_id = user_message_id
@@ -356,6 +368,8 @@ class OracleEngine:
             yield ("oracle", {
                 "reasoning": f"Round {round_num + 1} ({mode})",
                 "speakers": enriched,
+                "round": round_num + 1,
+                "mode": mode,
             })
 
             # Run the appropriate mode
@@ -411,6 +425,8 @@ class OracleEngine:
             )
             if summary:
                 yield ("summary", {"content": summary})
+
+        yield ("oracle_end", {})
 
     # ── Parallel mode ────────────────────────────────────────────────────
 

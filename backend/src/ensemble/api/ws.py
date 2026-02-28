@@ -440,7 +440,17 @@ class VoiceSession:
             async for event_type, data in self._oracle.run_group_turn_streaming(
                 self._conv, text, None, voice_mode=True
             ):
-                if event_type == "topic_set":
+                if event_type == "oracle_start":
+                    await _send(self._ws, {
+                        "type": "oracle_start",
+                        "directed": data.get("directed", False),
+                        "directed_agent": data.get("directed_agent"),
+                    })
+
+                elif event_type == "oracle_end":
+                    await _send(self._ws, {"type": "oracle_end"})
+
+                elif event_type == "topic_set":
                     await _send(self._ws, {"type": "topic_set", "topic": data.get("topic", "")})
 
                 elif event_type == "oracle":
@@ -448,6 +458,8 @@ class VoiceSession:
                         "type": "oracle_reasoning",
                         "reasoning": data.get("reasoning", ""),
                         "speakers": data.get("speakers", []),
+                        "round": data.get("round", 1),
+                        "mode": data.get("mode", "sequential"),
                     })
 
                 elif event_type == "turn_change":
@@ -760,7 +772,17 @@ async def _handle_group_streaming(
         async for event_type, data in oracle.run_group_turn_streaming(
             conv, content, attachments or None
         ):
-            if event_type == "topic_set":
+            if event_type == "oracle_start":
+                await _send(ws, {
+                    "type": "oracle_start",
+                    "directed": data.get("directed", False),
+                    "directed_agent": data.get("directed_agent"),
+                })
+
+            elif event_type == "oracle_end":
+                await _send(ws, {"type": "oracle_end"})
+
+            elif event_type == "topic_set":
                 await _send(ws, {
                     "type": "topic_set",
                     "topic": data.get("topic", ""),
@@ -771,6 +793,8 @@ async def _handle_group_streaming(
                     "type": "oracle_reasoning",
                     "reasoning": data.get("reasoning", ""),
                     "speakers": data.get("speakers", []),
+                    "round": data.get("round", 1),
+                    "mode": data.get("mode", "sequential"),
                 })
 
             elif event_type == "turn_change":

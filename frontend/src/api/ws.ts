@@ -5,6 +5,15 @@ import {
   commitMessage,
   updateConversationTopic,
 } from '../state/conversations.ts'
+import {
+  startOracle,
+  addRound,
+  addVerdictToCurrentRound,
+  setGraderResult,
+  setOracleSummary,
+  setOracleTopic,
+  endOracle,
+} from '../state/oracle.ts'
 import { activeCall, currentSpeaker, agentSpeaking, partialTranscript } from '../state/call.ts'
 import { generateId } from '../utils/format.ts'
 
@@ -88,74 +97,48 @@ class WebSocketManager {
     }
 
     switch (event.type) {
-      case 'message_chunk': {
-        const prev = streamingAgents.value.get(event.agent_id)
-        if (!prev) break
-        const updated = new Map(streamingAgents.value)
-        updated.set(event.agent_id, {
-          agentId: event.agent_id,
-          content: prev.content + event.content,
-          replyToId: prev.replyToId,
-        })
-        streamingAgents.value = updated
+      case 'message_chunk':
+        // No-op — typing indicator is driven by turn_change entry existence
         break
-      }
       case 'message_complete':
         commitMessage(event.message.agent_id ?? '', event.message)
         break
+      case 'oracle_start':
+        startOracle(event.directed, event.directed_agent)
+        break
+      case 'oracle_end':
+        endOracle()
+        break
       case 'topic_set':
         updateConversationTopic(event.topic)
-        appendMessage({
-          id: generateId(),
-          role: 'system',
-          content: `Topic: ${event.topic}`,
-          timestamp: new Date().toISOString(),
+        setOracleTopic(event.topic)
+        break
+      case 'oracle_reasoning':
+        addRound({
+          round: event.round,
+          mode: event.mode,
+          reasoning: event.reasoning,
+          speakers: event.speakers,
         })
         break
-      case 'oracle_reasoning': {
-        const lines = event.speakers?.length
-          ? event.speakers.map((s) => `${s.agent_name}: ${s.hint}`).join('\n')
-          : 'Round complete.'
-        appendMessage({
-          id: generateId(),
-          role: 'system',
-          content: `${event.reasoning}\n${lines}`,
-          timestamp: new Date().toISOString(),
-        })
+      case 'grader':
+        setGraderResult(event.round, event.reasoning, event.done)
         break
-      }
-      case 'grader': {
-        const status = event.done ? 'Complete' : 'Continuing'
-        appendMessage({
-          id: generateId(),
-          role: 'system',
-          content: `Grader (round ${event.round}): ${status} — ${event.reasoning}`,
-          timestamp: new Date().toISOString(),
-        })
-        break
-      }
       case 'agent_verdict':
-        appendMessage({
-          id: generateId(),
-          role: 'system',
-          content: `${event.agent_name}: ${event.verdict}`,
-          timestamp: new Date().toISOString(),
+        addVerdictToCurrentRound({
+          agentId: event.agent_id,
+          agentName: event.agent_name,
+          verdict: event.verdict,
         })
         break
       case 'summary':
-        appendMessage({
-          id: generateId(),
-          role: 'system',
-          content: `**Round Summary**\n${event.content}`,
-          timestamp: new Date().toISOString(),
-        })
+        setOracleSummary(event.content)
         break
       case 'turn_change': {
         currentSpeaker.value = event.agent_id
         const turnMap = new Map(streamingAgents.value)
         turnMap.set(event.agent_id, {
           agentId: event.agent_id,
-          content: '',
           replyToId: event.reply_to_id,
         })
         streamingAgents.value = turnMap

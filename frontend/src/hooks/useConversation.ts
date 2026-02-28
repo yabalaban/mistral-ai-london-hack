@@ -1,6 +1,7 @@
 import { useEffect } from 'preact/hooks'
 import { route } from 'preact-router'
 import { activeConversationId, conversations, upsertConversation } from '../state/conversations.ts'
+import { resetOracle } from '../state/oracle.ts'
 import { fetchConversation } from '../api/client.ts'
 import { wsManager } from '../api/ws.ts'
 import { USE_MOCKS } from '../config.ts'
@@ -9,6 +10,7 @@ export function useConversation(convId: string) {
   useEffect(() => {
     if (!convId) return
     activeConversationId.value = convId
+    resetOracle()
 
     if (USE_MOCKS) return
 

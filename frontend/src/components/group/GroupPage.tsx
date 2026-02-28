@@ -158,7 +158,7 @@ export function GroupPage({ id }: GroupPageProps) {
             </div>
           )}
           <div class="flex-1 overflow-hidden relative min-h-0">
-            <MessageList messages={conv.messages.filter(m => m.role !== 'system')} />
+            <MessageList messages={conv.messages} />
             {call && mode === 'voice' && partialTranscript.value && (
               <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-zinc-500 text-sm italic animate-pulse">
                 {partialTranscript.value}
@@ -177,7 +177,7 @@ export function GroupPage({ id }: GroupPageProps) {
             />
           )}
         </div>
-        {!call && <GroupMessages messages={conv.messages.filter(m => m.role === 'system')} />}
+        {!call && <GroupMessages />}
       </div>
 
       {showPicker && (

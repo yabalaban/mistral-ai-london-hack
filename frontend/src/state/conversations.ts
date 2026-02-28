@@ -4,10 +4,9 @@ import type { Conversation, Message } from '../types/index.ts'
 export const conversations = signal<Conversation[]>([])
 export const activeConversationId = signal<string | null>(null)
 
-/** Per-agent streaming state — tracks who is typing and accumulates content. */
+/** Per-agent streaming state — tracks who is currently typing. */
 export interface StreamingEntry {
   agentId: string
-  content: string
   replyToId?: string
 }
 export const streamingAgents = signal<Map<string, StreamingEntry>>(new Map())
