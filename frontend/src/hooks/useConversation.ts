@@ -1,4 +1,5 @@
 import { useEffect } from 'preact/hooks'
+import { route } from 'preact-router'
 import { activeConversationId, conversations, upsertConversation } from '../state/conversations.ts'
 import { fetchConversation } from '../api/client.ts'
 import { wsManager } from '../api/ws.ts'
@@ -14,17 +15,16 @@ export function useConversation(convId: string) {
     // Check if conversation exists locally first
     const existing = conversations.value.find((c) => c.id === convId)
     if (existing) {
-      // Already have it — just connect WS
       wsManager.connect(convId)
     } else {
-      // Try to fetch from backend, then connect WS
+      // Try to fetch from backend — redirect home if not found
       fetchConversation(convId)
         .then((conv) => {
           upsertConversation(conv)
           wsManager.connect(convId)
         })
-        .catch((err) => {
-          console.warn('Conversation not found, skipping WS connect', err)
+        .catch(() => {
+          route('/', true)
         })
     }
 
