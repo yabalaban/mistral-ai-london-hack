@@ -9,7 +9,11 @@ import { Button } from '../shared/Button.tsx'
 import type { Agent } from '../../types/index.ts'
 import { createGroupConversation } from '../../utils/conversations.ts'
 
-export function RosterPage() {
+interface RosterPageProps {
+  path?: string
+}
+
+export function RosterPage(_props: RosterPageProps) {
   const [showCreateAgent, setShowCreateAgent] = useState(false)
   const [showNewGroup, setShowNewGroup] = useState(false)
 

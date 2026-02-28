@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Cleanup
+    await oracle.cleanup()
     await registry.cleanup_mistral()
     logger.info("Mistral agents cleaned up")
 

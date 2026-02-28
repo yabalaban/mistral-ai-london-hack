@@ -48,4 +48,5 @@ export type WSEvent =
   | { type: 'call_started'; call: GroupCall }
   | { type: 'call_ended'; call_id: string }
   | { type: 'audio_chunk'; agent_id: string; data: string }
+  | { type: 'transcription'; text: string }
   | { type: 'error'; message: string }

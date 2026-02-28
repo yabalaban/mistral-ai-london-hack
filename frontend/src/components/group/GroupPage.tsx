@@ -25,6 +25,7 @@ import type { Attachment } from '../../types/index.ts'
 const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
 
 interface GroupPageProps {
+  path?: string
   id?: string
 }
 

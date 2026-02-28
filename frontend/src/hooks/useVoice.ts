@@ -87,7 +87,7 @@ export function useVoice() {
         const reader = new FileReader()
         reader.onloadend = () => {
           const base64 = (reader.result as string).split(',')[1]
-          wsManager.send({ type: 'audio_chunk', data: base64 })
+          wsManager.send({ type: 'audio', data: base64 })
         }
         reader.readAsDataURL(e.data)
       }

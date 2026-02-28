@@ -1,115 +1,102 @@
-"""Oracle engine — orchestrates multi-agent group conversations.
+"""Oracle engine using Mistral native handoffs.
 
-The oracle is an invisible meta-agent that decides which agent should speak
-next in a group conversation, using conversation context and agent profiles.
-It never speaks directly to the user.
+Instead of manually routing between agents, we create:
+- An oracle agent with handoffs to all participant agents
+- Each participant agent with cross-handoffs to all other participants
+- One Mistral Conversation per group — Mistral handles all orchestration
+
+The oracle's job is simple: receive the user's message and hand off to
+the most relevant agent. That agent responds and can hand off to the next.
 """
 
 from __future__ import annotations
 
-import json
 import logging
+from typing import Any
 
 from mistralai import Mistral
 
 from ensemble.agents.registry import AgentRegistry
 from ensemble.config import settings
-from ensemble.conversations.manager import _handle_function_calls
 from ensemble.conversations.models import (
     Attachment,
     Conversation,
     Message,
     MessageRole,
 )
-from ensemble.utils import extract_reply
 
 logger = logging.getLogger(__name__)
 
-ORACLE_SYSTEM_PROMPT = """\
-You are an invisible conversation orchestrator. You manage a group discussion between \
-multiple AI agents and a human user.
-
-Your job:
-1. Decide which agent should speak next based on the conversation context
-2. Optionally provide a brief steering hint to guide the next speaker's response
-3. Keep the conversation flowing naturally — avoid repetition, ensure all voices are heard
-
-You NEVER speak to the user directly. You are invisible.
+ORACLE_INSTRUCTIONS = """\
+You are an invisible conversation moderator for a group discussion.
 
 Participants:
 {participants}
 
-Respond ONLY with valid JSON:
-{{"next_speaker": "<agent-id>", "hint": "<optional steering hint or empty string>"}}
+Rules:
+- When a user sends a message, hand off to the most relevant participant first.
+- Do NOT answer yourself — always hand off.
+- The participants will hand off to each other after responding.
+- You are invisible to the user.
 """
 
 
 class OracleEngine:
-    """Orchestrates group conversations by deciding turn order."""
+    """Orchestrates group conversations using Mistral native handoffs."""
 
     def __init__(self, client: Mistral, registry: AgentRegistry) -> None:
         self._client = client
         self._registry = registry
+        # Oracle Mistral agent IDs per group conversation
+        self._oracle_agents: dict[str, str] = {}  # conv_id -> oracle mistral agent id
 
-    async def decide_next_speaker(
-        self, conversation: Conversation, last_speaker: str | None = None
-    ) -> tuple[str, str]:
-        """Returns (agent_id, hint) for who should speak next."""
+    async def setup_group(self, conversation: Conversation) -> str:
+        """Create an oracle agent with handoffs for a group conversation.
+
+        Sets up cross-handoffs between all participant agents.
+        Returns the oracle's Mistral agent ID.
+        """
+        agent_ids = conversation.participant_agent_ids
+        mistral_ids = []
+        for aid in agent_ids:
+            agent = self._registry.get(aid)
+            if agent and agent.mistral_agent_id:
+                mistral_ids.append((aid, agent.mistral_agent_id))
+
+        if len(mistral_ids) < 2:
+            raise ValueError("Need at least 2 ready agents for a group")
+
+        # Set up cross-handoffs: each agent can hand off to all others
+        for i, (aid, mid) in enumerate(mistral_ids):
+            other_ids = [m for j, (_, m) in enumerate(mistral_ids) if j != i]
+            try:
+                await self._client.beta.agents.update_async(
+                    agent_id=mid,
+                    handoffs=other_ids,
+                )
+                logger.info("Set handoffs for %s → %d others", aid, len(other_ids))
+            except Exception:
+                logger.exception("Failed to set handoffs for %s", aid)
+
+        # Create oracle agent
         participants_desc = []
-        for aid in conversation.participant_agent_ids:
+        for aid, mid in mistral_ids:
             agent = self._registry.get(aid)
             if agent:
-                participants_desc.append(
-                    f"- {aid}: {agent.name} — {agent.role}. {agent.personality}"
-                )
+                participants_desc.append(f"- {agent.name}: {agent.role}. {agent.personality}")
 
-        system_prompt = ORACLE_SYSTEM_PROMPT.format(
-            participants="\n".join(participants_desc)
+        oracle = await self._client.beta.agents.create_async(
+            model=settings.oracle_model,
+            name="Oracle",
+            instructions=ORACLE_INSTRUCTIONS.format(
+                participants="\n".join(participants_desc)
+            ),
+            handoffs=[mid for _, mid in mistral_ids],
         )
 
-        # Build recent conversation context for oracle
-        recent = conversation.messages[-20:]  # last 20 messages
-        messages = [{"role": "system", "content": system_prompt}]
-        for msg in recent:
-            if msg.role == MessageRole.USER:
-                messages.append({"role": "user", "content": msg.content})
-            else:
-                label = msg.agent_id or "unknown"
-                messages.append({
-                    "role": "assistant",
-                    "content": f"[{label}]: {msg.content}",
-                })
-
-        if last_speaker:
-            messages.append({
-                "role": "user",
-                "content": f"[System] {last_speaker} just spoke. Who should speak next?",
-            })
-        else:
-            messages.append({
-                "role": "user",
-                "content": "[System] The user just sent a message. Who should respond first?",
-            })
-
-        try:
-            response = await self._client.chat.complete_async(
-                model=settings.oracle_model,
-                messages=messages,
-                response_format={"type": "json_object"},
-            )
-            text = response.choices[0].message.content.strip()
-            data = json.loads(text)
-            next_speaker = data.get("next_speaker", conversation.participant_agent_ids[0])
-            hint = data.get("hint", "")
-
-            # Validate speaker is in the conversation
-            if next_speaker not in conversation.participant_agent_ids:
-                next_speaker = conversation.participant_agent_ids[0]
-
-            return next_speaker, hint
-        except Exception:
-            logger.exception("Oracle decision failed, falling back to first agent")
-            return conversation.participant_agent_ids[0], ""
+        self._oracle_agents[conversation.id] = oracle.id
+        logger.info("Created oracle %s for conversation %s", oracle.id, conversation.id)
+        return oracle.id
 
     async def run_group_turn(
         self,
@@ -118,7 +105,7 @@ class OracleEngine:
         attachments: list[Attachment] | None = None,
         max_rounds: int = 1,
     ) -> list[Message]:
-        """Run one or more rounds of group conversation after a user message.
+        """Run a group conversation turn using native handoffs.
 
         Returns the list of agent messages generated.
         """
@@ -130,73 +117,216 @@ class OracleEngine:
         )
         conversation.messages.append(user_msg)
 
+        # Ensure oracle is set up
+        oracle_id = self._oracle_agents.get(conversation.id)
+        if not oracle_id:
+            oracle_id = await self.setup_group(conversation)
+
+        # Build inputs
+        inputs = content
+        if attachments:
+            parts: list[dict] = [{"type": "text", "text": content}]
+            for att in attachments:
+                if att.type == "image":
+                    parts.append({"type": "image_url", "image_url": {"url": att.url}})
+            inputs = [{"role": "user", "content": parts}]
+
+        # Start or continue Mistral conversation
+        mistral_conv_id = conversation.mistral_conversation_ids.get("__group__")
+        if mistral_conv_id:
+            response = await self._client.beta.conversations.append_async(
+                conversation_id=mistral_conv_id,
+                inputs=inputs,
+                handoff_execution="server",
+            )
+        else:
+            response = await self._client.beta.conversations.start_async(
+                agent_id=oracle_id,
+                inputs=inputs,
+                handoff_execution="server",
+            )
+
+        conversation.mistral_conversation_ids["__group__"] = response.conversation_id
+
+        # Parse outputs — extract messages and handoffs
         agent_messages: list[Message] = []
-        last_speaker: str | None = None
+        for output in response.outputs:
+            otype = type(output).__name__
 
-        for _ in range(max_rounds):
-            # Oracle decides who speaks
-            next_id, hint = await self.decide_next_speaker(conversation, last_speaker)
-            agent = self._registry.get(next_id)
-            if not agent or not agent.mistral_agent_id:
-                logger.warning("Agent %s not ready, skipping", next_id)
-                continue
+            if otype == "MessageOutputEntry":
+                text = _extract_text(output)
+                if text:
+                    # Map Mistral agent ID back to our agent ID
+                    mistral_aid = getattr(output, "agent_id", None)
+                    our_aid = self._resolve_agent_id(mistral_aid)
+                    msg = Message(
+                        role=MessageRole.AGENT,
+                        agent_id=our_aid,
+                        content=text,
+                    )
+                    conversation.messages.append(msg)
+                    agent_messages.append(msg)
 
-            # Build prompt for the agent — include conversation context + oracle hint
-            agent_prompt = self._build_agent_prompt(conversation, next_id, hint)
-
-            # Get agent response via its own Mistral conversation
-            mistral_conv_id = conversation.mistral_conversation_ids.get(next_id)
-            if mistral_conv_id:
-                response = await self._client.beta.conversations.append_async(
-                    conversation_id=mistral_conv_id,
-                    inputs=agent_prompt,
-                )
-            else:
-                response = await self._client.beta.conversations.start_async(
-                    agent_id=agent.mistral_agent_id,
-                    inputs=agent_prompt,
-                )
-            conversation.mistral_conversation_ids[next_id] = response.conversation_id
-
-            # Handle function calls
-            response = await _handle_function_calls(
-                self._client, response, conversation, next_id
-            )
-
-            reply_text = extract_reply(response)
-            agent_msg = Message(
-                role=MessageRole.AGENT,
-                agent_id=next_id,
-                content=reply_text,
-            )
-            conversation.messages.append(agent_msg)
-            agent_messages.append(agent_msg)
-            last_speaker = next_id
+            elif otype == "AgentHandoffEntry":
+                # Log handoff for debugging / UI
+                prev = getattr(output, "previous_agent_name", "?")
+                next_name = getattr(output, "next_agent_name", "?")
+                logger.info("Handoff: %s → %s", prev, next_name)
 
         return agent_messages
 
-    def _build_agent_prompt(
-        self, conversation: Conversation, agent_id: str, hint: str
-    ) -> str:
-        """Build a context-rich prompt for the agent in a group setting."""
-        # Summarize recent messages so agent knows what's been said
-        recent = conversation.messages[-10:]
-        context_lines = []
-        for msg in recent:
-            if msg.role == MessageRole.USER:
-                context_lines.append(f"User: {msg.content}")
-            else:
-                name = msg.agent_id or "unknown"
-                agent_profile = self._registry.get(name)
-                display = agent_profile.name if agent_profile else name
-                context_lines.append(f"{display}: {msg.content}")
+    async def run_group_turn_streaming(
+        self,
+        conversation: Conversation,
+        content: str,
+        attachments: list[Attachment] | None = None,
+    ):
+        """Generator that yields (event_type, data) for streaming group turns.
 
-        context = "\n".join(context_lines)
-        prompt = f"[Group conversation context]\n{context}\n\n"
-        if hint:
-            prompt += f"[Moderator note: {hint}]\n\n"
-        prompt += "It's your turn to contribute. Respond naturally as yourself."
-        return prompt
+        Yields:
+            ("handoff", {"from": "name", "to": "name", "agent_id": "our_id"})
+            ("chunk", {"agent_id": "our_id", "content": "text"})
+            ("message", Message)
+        """
+        # Record user message
+        user_msg = Message(
+            role=MessageRole.USER,
+            content=content,
+            attachments=attachments or [],
+        )
+        conversation.messages.append(user_msg)
+
+        # Ensure oracle
+        oracle_id = self._oracle_agents.get(conversation.id)
+        if not oracle_id:
+            oracle_id = await self.setup_group(conversation)
+
+        # Build inputs
+        inputs = content
+        if attachments:
+            parts: list[dict] = [{"type": "text", "text": content}]
+            for att in attachments:
+                if att.type == "image":
+                    parts.append({"type": "image_url", "image_url": {"url": att.url}})
+            inputs = [{"role": "user", "content": parts}]
+
+        # Stream
+        mistral_conv_id = conversation.mistral_conversation_ids.get("__group__")
+        if mistral_conv_id:
+            stream = await self._client.beta.conversations.append_stream_async(
+                conversation_id=mistral_conv_id,
+                inputs=inputs,
+                handoff_execution="server",
+            )
+        else:
+            stream = await self._client.beta.conversations.start_stream_async(
+                agent_id=oracle_id,
+                inputs=inputs,
+                handoff_execution="server",
+            )
+
+        current_agent_id = None
+        current_text = ""
+
+        async for event in stream:
+            data = event.data
+            dtype = type(data).__name__
+
+            # Capture conversation ID
+            if hasattr(data, "conversation_id") and data.conversation_id:
+                conversation.mistral_conversation_ids["__group__"] = data.conversation_id
+
+            if "Handoff" in dtype:
+                # Emit any pending message before handoff
+                if current_text and current_agent_id:
+                    msg = Message(
+                        role=MessageRole.AGENT,
+                        agent_id=current_agent_id,
+                        content=current_text,
+                    )
+                    conversation.messages.append(msg)
+                    yield ("message", msg)
+                    current_text = ""
+
+                prev = getattr(data, "previous_agent_name", "?")
+                next_name = getattr(data, "next_agent_name", "?")
+                next_mid = getattr(data, "next_agent_id", None)
+                current_agent_id = self._resolve_agent_id(next_mid)
+                yield ("handoff", {
+                    "from": prev,
+                    "to": next_name,
+                    "agent_id": current_agent_id,
+                })
+
+            elif hasattr(data, "content"):
+                text = _extract_chunk(data)
+                if text:
+                    current_text += text
+                    yield ("chunk", {
+                        "agent_id": current_agent_id,
+                        "content": text,
+                    })
+
+        # Emit final message
+        if current_text and current_agent_id:
+            msg = Message(
+                role=MessageRole.AGENT,
+                agent_id=current_agent_id,
+                content=current_text,
+            )
+            conversation.messages.append(msg)
+            yield ("message", msg)
+
+    def _resolve_agent_id(self, mistral_agent_id: str | None) -> str | None:
+        """Map a Mistral agent ID back to our local agent ID."""
+        if not mistral_agent_id:
+            return None
+        for aid, profile in self._registry.agents.items():
+            if profile.mistral_agent_id == mistral_agent_id:
+                return aid
+        return mistral_agent_id  # fallback to Mistral ID
+
+    async def cleanup(self) -> None:
+        """Delete oracle agents on shutdown."""
+        for conv_id, oracle_id in self._oracle_agents.items():
+            try:
+                await self._client.beta.agents.delete_async(agent_id=oracle_id)
+                logger.info("Deleted oracle for conversation %s", conv_id)
+            except Exception:
+                logger.exception("Failed to delete oracle for %s", conv_id)
 
 
-# _extract_reply removed — use ensemble.utils.extract_reply instead
+def _extract_text(output) -> str:
+    content = output.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for c in content:
+            if isinstance(c, dict):
+                texts.append(c.get("text", ""))
+            elif hasattr(c, "text"):
+                texts.append(getattr(c, "text", "") or "")
+        return "".join(texts)
+    if hasattr(content, "text"):
+        return content.text or ""
+    return str(content)
+
+
+def _extract_chunk(data) -> str:
+    content = getattr(data, "content", None)
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for c in content:
+            if isinstance(c, dict):
+                texts.append(c.get("text", ""))
+            elif hasattr(c, "text"):
+                texts.append(getattr(c, "text", "") or "")
+        return "".join(texts)
+    if hasattr(content, "text"):
+        return content.text or ""
+    return ""

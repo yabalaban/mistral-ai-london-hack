@@ -110,6 +110,7 @@ async def get_conversation(conversation_id: str):
         "type": conv.type,
         "participants": conv.participant_agent_ids,
         "messages": [_message_to_dict(m) for m in conv.messages],
+        "created_at": conv.created_at.isoformat(),
     }
 
 

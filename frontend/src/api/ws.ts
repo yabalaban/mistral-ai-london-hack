@@ -3,6 +3,7 @@ import {
   streamingMessage,
   streamingAgentId,
   appendMessage,
+  lastTranscription,
 } from '../state/conversations.ts'
 import { activeCall, currentSpeaker } from '../state/call.ts'
 
@@ -92,6 +93,9 @@ class WebSocketManager {
       case 'call_ended':
         activeCall.value = null
         currentSpeaker.value = null
+        break
+      case 'transcription':
+        lastTranscription.value = event.text
         break
     }
 

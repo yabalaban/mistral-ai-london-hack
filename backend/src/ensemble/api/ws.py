@@ -146,17 +146,17 @@ async def _handle_message(
         await _send(ws, {"type": "error", "message": "Empty message"})
         return
 
-    # Record user message
-    user_msg = Message(
-        role=MessageRole.USER,
-        content=content,
-        attachments=attachments,
-    )
-    conv.messages.append(user_msg)
-
     if conv.type == ConversationType.DIRECT:
+        # Record user message here (direct streaming doesn't do it)
+        user_msg = Message(
+            role=MessageRole.USER,
+            content=content,
+            attachments=attachments,
+        )
+        conv.messages.append(user_msg)
         await _handle_direct_streaming(ws, conv, content, attachments, registry, mistral_client)
     else:
+        # Group streaming handler (oracle) records the user message internally
         await _handle_group_streaming(ws, conv, content, attachments, registry, oracle, mistral_client)
 
 
@@ -201,33 +201,49 @@ async def _handle_group_streaming(
     oracle: OracleEngine,
     mistral_client: Any,
 ) -> None:
-    """Handle group conversation with oracle-driven turns and streaming."""
-    last_speaker: str | None = None
+    """Handle group conversation using Mistral native handoffs with streaming."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
 
-    for _ in range(len(conv.participant_agent_ids)):
-        # Oracle decides next speaker
-        next_id, hint = await oracle.decide_next_speaker(conv, last_speaker)
-        agent = registry.get(next_id)
-        if not agent or not agent.mistral_agent_id:
-            continue
+    try:
+        msg_ids: dict[str, str] = {}  # agent_id -> current message_id
 
-        # Notify turn change
-        await _send(ws, {"type": "turn_change", "agent_id": next_id, "hint": hint})
+        async for event_type, data in oracle.run_group_turn_streaming(
+            conv, content, attachments or None
+        ):
+            if event_type == "handoff":
+                agent_id = data.get("agent_id")
+                msg_ids[agent_id] = _uuid.uuid4().hex[:12]
+                await _send(ws, {
+                    "type": "turn_change",
+                    "agent_id": agent_id,
+                })
 
-        # Build agent prompt with group context
-        agent_prompt = oracle._build_agent_prompt(conv, next_id, hint)
-        mistral_conv_id = conv.mistral_conversation_ids.get(next_id)
+            elif event_type == "chunk":
+                agent_id = data.get("agent_id")
+                await _send(ws, {
+                    "type": "message_chunk",
+                    "agent_id": agent_id,
+                    "content": data.get("content", ""),
+                    "message_id": msg_ids.get(agent_id, ""),
+                })
 
-        try:
-            full_text = await _stream_agent_response(
-                ws, conv, next_id, agent.mistral_agent_id, agent_prompt, mistral_conv_id, mistral_client
-            )
-            agent_msg = Message(role=MessageRole.AGENT, agent_id=next_id, content=full_text)
-            conv.messages.append(agent_msg)
-            last_speaker = next_id
-        except Exception:
-            logger.exception("Streaming failed for agent %s in group", next_id)
-            await _send(ws, {"type": "error", "message": f"Agent {next_id} response failed"})
+            elif event_type == "message":
+                msg = data  # This is a Message object
+                await _send(ws, {
+                    "type": "message_complete",
+                    "message": {
+                        "id": msg_ids.get(msg.agent_id, _uuid.uuid4().hex[:12]),
+                        "role": "assistant",
+                        "agent_id": msg.agent_id,
+                        "content": msg.content,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                })
+
+    except Exception:
+        logger.exception("Group streaming failed")
+        await _send(ws, {"type": "error", "message": "Group conversation failed"})
 
 
 async def _handle_audio(
@@ -319,11 +335,13 @@ async def _stream_agent_response(
         stream = await mistral_client.beta.conversations.append_stream_async(
             conversation_id=mistral_conv_id,
             inputs=inputs,
+            handoff_execution="client",
         )
     else:
         stream = await mistral_client.beta.conversations.start_stream_async(
             agent_id=mistral_agent_id,
             inputs=inputs,
+            handoff_execution="client",
         )
 
     async for event in stream:
