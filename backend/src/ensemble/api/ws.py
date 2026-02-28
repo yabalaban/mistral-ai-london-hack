@@ -1011,6 +1011,10 @@ def _extract_chunk_text(output) -> str:
 
 async def _send(ws: WebSocket, data: dict) -> None:
     """Send JSON to WebSocket, ignoring errors on closed connections."""
+    if data.get("type") == "message_complete":
+        content = data.get("message", {}).get("content", "")
+        delay = min(max(len(content) * 0.004, 0.5), 2.5)
+        await asyncio.sleep(delay)
     if ws.client_state == WebSocketState.CONNECTED:
         try:
             await ws.send_json(data)
