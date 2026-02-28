@@ -69,15 +69,14 @@ Set `done: true` and `next_speaker: null` when the round is complete.\
 """
 
 AGENT_CONTEXT_TEMPLATE = """\
-[Group Discussion — you're {name}]
-[Thread topic: {topic}]
+[Group chat — you're {name}]
+[Topic: {topic}]
 
-What's been said:
 {context}
 
-[Moderator → {name}]: {hint}
+[→ {name}]: {hint}
 
-Respond in 2-3 sentences. Be direct and in character. Build on or challenge what others said — don't repeat their points. Stay on topic.\
+Keep it tight — 2-3 sentences. Don't repeat what others said. Be yourself.\
 """
 
 
