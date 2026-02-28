@@ -1,3 +1,9 @@
+"""Conversation management — routing messages to Mistral agents.
+
+Handles direct (1:1) conversations with individual agents,
+including function call (tool use) handling.
+"""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +20,7 @@ from ensemble.conversations.models import (
     MessageRole,
 )
 from ensemble.tools.slides import create_slides
+from ensemble.utils import build_inputs, extract_reply
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +40,11 @@ class ConversationManager:
 
     @property
     def conversations(self) -> dict[str, Conversation]:
+        """Return a shallow copy of the conversations dict."""
         return dict(self._conversations)
 
     def get(self, conversation_id: str) -> Conversation | None:
+        """Look up a conversation by ID, returning ``None`` if not found."""
         return self._conversations.get(conversation_id)
 
     def create(
@@ -48,6 +57,12 @@ class ConversationManager:
         for aid in participant_agent_ids:
             if not self._registry.get(aid):
                 raise ValueError(f"Unknown agent: {aid}")
+
+        if type == ConversationType.DIRECT and len(participant_agent_ids) != 1:
+            raise ValueError("Direct conversations must have exactly 1 participant agent")
+
+        if type == ConversationType.GROUP and len(participant_agent_ids) < 2:
+            raise ValueError("Group conversations must have at least 2 participant agents")
 
         conv = Conversation(type=type, participant_agent_ids=participant_agent_ids)
         self._conversations[conv.id] = conv
@@ -81,7 +96,7 @@ class ConversationManager:
         conv.messages.append(user_msg)
 
         # Build inputs for Mistral
-        inputs = _build_inputs(content, attachments)
+        inputs = build_inputs(content, attachments)
 
         # Start or continue Mistral conversation
         # Use client handoff so we handle function calls locally
@@ -107,7 +122,7 @@ class ConversationManager:
         )
 
         # Extract assistant reply
-        reply_text = _extract_reply(response)
+        reply_text = extract_reply(response)
         agent_msg = Message(
             role=MessageRole.AGENT,
             agent_id=agent_id,
@@ -182,37 +197,7 @@ async def _handle_function_calls(client, response, conv, agent_id, max_rounds: i
     return response
 
 
-def _build_inputs(
-    content: str, attachments: list[Attachment] | None = None
-) -> str | list[dict]:
-    """Build Mistral conversation inputs from content + optional attachments."""
-    if not attachments:
-        return content
 
-    # Multimodal: build content blocks
-    parts: list[dict] = [{"type": "text", "text": content}]
-    for att in attachments:
-        if att.type == "image":
-            parts.append({"type": "image_url", "image_url": {"url": att.url}})
-    return [{"role": "user", "content": parts}]
-
-
-def _extract_reply(response) -> str:
-    """Extract the text reply from a Mistral conversation response."""
-    for output in response.outputs:
-        if hasattr(output, "content") and hasattr(output, "role"):
-            content = output.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                texts = []
-                for c in content:
-                    if isinstance(c, dict):
-                        texts.append(c.get("text", ""))
-                    elif hasattr(c, "text"):
-                        texts.append(getattr(c, "text", "") or "")
-                return "".join(texts)
-            if hasattr(content, "text"):
-                return content.text or ""
-            return str(content)
-    return ""
+# Re-export for backward compatibility and for ws.py import
+_build_inputs = build_inputs
+_extract_reply = extract_reply

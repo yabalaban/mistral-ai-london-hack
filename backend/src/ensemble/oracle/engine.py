@@ -1,3 +1,10 @@
+"""Oracle engine — orchestrates multi-agent group conversations.
+
+The oracle is an invisible meta-agent that decides which agent should speak
+next in a group conversation, using conversation context and agent profiles.
+It never speaks directly to the user.
+"""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +21,7 @@ from ensemble.conversations.models import (
     Message,
     MessageRole,
 )
+from ensemble.utils import extract_reply
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +163,7 @@ class OracleEngine:
                 self._client, response, conversation, next_id
             )
 
-            reply_text = _extract_reply(response)
+            reply_text = extract_reply(response)
             agent_msg = Message(
                 role=MessageRole.AGENT,
                 agent_id=next_id,
@@ -191,21 +199,4 @@ class OracleEngine:
         return prompt
 
 
-def _extract_reply(response) -> str:
-    for output in response.outputs:
-        if hasattr(output, "content") and hasattr(output, "role"):
-            content = output.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                texts = []
-                for c in content:
-                    if isinstance(c, dict):
-                        texts.append(c.get("text", ""))
-                    elif hasattr(c, "text"):
-                        texts.append(getattr(c, "text", "") or "")
-                return "".join(texts)
-            if hasattr(content, "text"):
-                return content.text or ""
-            return str(content)
-    return ""
+# _extract_reply removed — use ensemble.utils.extract_reply instead

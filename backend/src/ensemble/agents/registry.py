@@ -35,9 +35,11 @@ class AgentRegistry:
 
     @property
     def agents(self) -> dict[str, AgentProfile]:
+        """Return a shallow copy of the agents dict."""
         return dict(self._agents)
 
     def get(self, agent_id: str) -> AgentProfile | None:
+        """Look up an agent profile by ID, returning ``None`` if not found."""
         return self._agents.get(agent_id)
 
     def load_profiles(self, profiles_dir: Path) -> None:

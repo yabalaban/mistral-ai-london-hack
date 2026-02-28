@@ -39,6 +39,7 @@ from ensemble.conversations.models import (
     MessageRole,
 )
 from ensemble.oracle.engine import OracleEngine
+from ensemble.utils import build_inputs, extract_reply, extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +51,18 @@ class ConnectionManager:
         self._connections: dict[str, list[WebSocket]] = {}
 
     async def connect(self, conversation_id: str, ws: WebSocket) -> None:
+        """Accept a WebSocket connection and register it for the conversation."""
         await ws.accept()
         self._connections.setdefault(conversation_id, []).append(ws)
 
     def disconnect(self, conversation_id: str, ws: WebSocket) -> None:
+        """Remove a WebSocket connection from the conversation's connection list."""
         conns = self._connections.get(conversation_id, [])
         if ws in conns:
             conns.remove(ws)
 
     async def broadcast(self, conversation_id: str, data: dict[str, Any]) -> None:
+        """Send a JSON message to all connected WebSockets for a conversation."""
         for ws in self._connections.get(conversation_id, []):
             if ws.client_state == WebSocketState.CONNECTED:
                 try:
@@ -161,7 +165,7 @@ async def _handle_direct_streaming(
         await _send(ws, {"type": "error", "detail": f"Agent {agent_id} not ready"})
         return
 
-    inputs = _build_inputs(content, attachments)
+    inputs = build_inputs(content, attachments)
     mistral_conv_id = conv.mistral_conversation_ids.get(agent_id)
 
     try:
@@ -372,39 +376,21 @@ async def _stream_agent_response(
 
 
 def _extract_chunk_text_from_response(response) -> str:
-    """Extract text from a non-streaming conversation response."""
-    for output in response.outputs:
-        if hasattr(output, "content") and hasattr(output, "role"):
-            return _extract_chunk_text(output)
-    return ""
+    """Extract text from a non-streaming conversation response.
 
-
-def _build_inputs(content: str, attachments: list[Attachment]) -> str | list[dict]:
-    if not attachments:
-        return content
-    parts: list[dict] = [{"type": "text", "text": content}]
-    for att in attachments:
-        if att.type == "image":
-            parts.append({"type": "image_url", "image_url": {"url": att.url}})
-    return [{"role": "user", "content": parts}]
+    Delegates to the shared ``extract_reply`` helper.
+    """
+    return extract_reply(response)
 
 
 def _extract_chunk_text(output) -> str:
-    """Extract text from a streaming output chunk."""
+    """Extract text from a streaming output chunk.
+
+    Delegates to the shared ``extract_text_from_content`` helper.
+    Returns empty string if the output has no ``content`` attribute.
+    """
     if hasattr(output, "content"):
-        content = output.content
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            texts = []
-            for c in content:
-                if isinstance(c, dict):
-                    texts.append(c.get("text", ""))
-                elif hasattr(c, "text"):
-                    texts.append(getattr(c, "text", "") or "")
-            return "".join(texts)
-        if hasattr(content, "text"):
-            return content.text or ""
+        return extract_text_from_content(output.content)
     return ""
 
 

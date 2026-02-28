@@ -292,6 +292,16 @@ GET /api/slides/{presentation_id}
 Slides are generated when the PA agent uses the `create_slides` function tool.
 The agent returns a link like `/api/slides/6b9b29a7581f` in its response.
 
+#### Download Presentation as PDF
+
+```
+GET /api/slides/{presentation_id}/pdf
+```
+
+**Response:** PDF file bytes with `Content-Type: application/pdf`. Returns `404` if not found.
+
+Requires Playwright/Chromium to be installed for rendering.
+
 **How it works:**
 1. User asks PA to "create slides about X from my notes"
 2. PA agent calls `create_slides` tool with structured slide data
@@ -510,7 +520,7 @@ Agents are defined as JSON files in `backend/agents/`. Each file has:
 }
 ```
 
-**Available tools:** `code_interpreter`, `web_search`
+**Available tools:** `code_interpreter`, `web_search`, `image_generation`, `create_slides`
 
 **Current agents:**
 | ID | Name | Role | Tools |
