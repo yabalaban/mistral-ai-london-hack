@@ -44,12 +44,17 @@ This is a natural group thread — like humans chatting, not a panel discussion.
 Pick the most relevant person to respond. Only add more speakers if they have \
 something genuinely different to contribute. Not everyone needs to talk every time.
 
+**Directed messages**: If the user addresses a specific person by name \
+(e.g. "Sofia, can you..." or "Emma, what do you think..."), ONLY that person \
+should respond. Set done=true after they speak. Don't let others pile on.
+
 Give specific directives: "challenge the scaling assumption" not "share your thoughts".
 
 Keep the thread on topic. If the topic is "General discussion" (not yet set), \
 let the conversation flow naturally until one emerges.
 
-Set done=true when key perspectives are covered or when no one would naturally add to it.
+Set done=true when key perspectives are covered or when no one would naturally add to it. \
+Fewer speakers is almost always better. 2-3 max for most questions.
 
 ## Response Format (JSON)
 {{
@@ -160,6 +165,19 @@ class OracleEngine:
                     return aid, "Share your thoughts", "Fallback", False
             return None, "", "All done", True
 
+    def _detect_directed_message(self, content: str, agent_ids: list[str]) -> str | None:
+        """Check if a message is directed at a specific agent by name."""
+        lower = content.lower()
+        for aid in agent_ids:
+            agent = self._registry.get(aid)
+            if not agent:
+                continue
+            name = agent.name.lower()
+            # "Sofia, can you..." or "hey emma" or "emma:" etc.
+            if lower.startswith(name) or lower.startswith(f"hey {name}") or f"{name}," in lower or f"{name}:" in lower:
+                return aid
+        return None
+
     async def grade_topic(self, conversation: Conversation) -> str | None:
         """Use Mistral to grade whether user messages contain a real topic.
 
@@ -254,7 +272,11 @@ class OracleEngine:
         last_speaker = None
         speakers_this_round: list[str] = []
 
-        for _ in range(MAX_SPEAKERS_PER_TURN):
+        # Detect directed messages — hard cap at 1 speaker
+        directed_agent = self._detect_directed_message(content, conversation.participant_agent_ids)
+        max_turns = 1 if directed_agent else MAX_SPEAKERS_PER_TURN
+
+        for _ in range(max_turns):
             next_id, hint, reasoning, done = await self.decide_next_speaker(
                 conversation, last_speaker, speakers_this_round
             )
