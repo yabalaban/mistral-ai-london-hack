@@ -1,3 +1,5 @@
+import { useState } from 'preact/hooks'
+
 interface AvatarProps {
   src?: string
   name: string
@@ -28,15 +30,17 @@ function getColor(name: string) {
 }
 
 export function Avatar({ src, name, size = 'md', speaking = false }: AvatarProps) {
+  const [imgError, setImgError] = useState(false)
   const sizeClass = sizes[size]
   const ringClass = speaking ? 'ring-2 ring-accent speaking-ring' : ''
+  const showImg = src && !imgError
 
   return (
     <div
       class={`${sizeClass} ${ringClass} rounded-full flex-shrink-0 overflow-hidden flex items-center justify-center`}
     >
-      {src ? (
-        <img src={src} alt={name} class="w-full h-full object-cover" />
+      {showImg ? (
+        <img src={src} alt={name} class="w-full h-full object-cover" onError={() => setImgError(true)} />
       ) : (
         <div
           class={`w-full h-full flex items-center justify-center ${getColor(name)} text-white font-semibold`}

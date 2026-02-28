@@ -5,6 +5,7 @@ import {
   activeConversation,
   addOptimisticMessage,
 } from '../../state/conversations.ts'
+import { agentMap } from '../../state/agents.ts'
 import { activeCall, callMode } from '../../state/call.ts'
 import { startCall, endCall, sendMessage } from '../../api/client.ts'
 import { Header } from '../layout/Header.tsx'
@@ -62,7 +63,6 @@ export function GroupPage({ id }: GroupPageProps) {
   const handleEndCall = async () => {
     if (USE_MOCKS) {
       activeCall.value = null
-      route('/')
       return
     }
     try {
@@ -70,7 +70,7 @@ export function GroupPage({ id }: GroupPageProps) {
     } catch (err) {
       console.error('Failed to end call', err)
     }
-    route('/')
+    activeCall.value = null
   }
 
   const handleToggleMode = () => {
@@ -111,10 +111,16 @@ export function GroupPage({ id }: GroupPageProps) {
   }
 
   const participants = conv.participants
+  const participantNames = participants
+    .filter((p) => p !== 'user')
+    .map((id) => agentMap.value.get(id)?.name)
+    .filter(Boolean)
+    .join(', ')
+  const title = participantNames || 'Group Chat'
 
   return (
     <>
-      <Header title="Group Chat" onToggleLogs={() => setLogsOpen((o) => !o)}>
+      <Header title={title} onToggleLogs={() => setLogsOpen((o) => !o)}>
         {!call ? (
           <button
             onClick={handleStartCall}

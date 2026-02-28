@@ -11,6 +11,7 @@ import { sendMessage, startCall, endCall } from '../../api/client.ts'
 import { Header } from '../layout/Header.tsx'
 import { MessageList } from './MessageList.tsx'
 import { ChatInput } from './ChatInput.tsx'
+import { AgentProfilePanel } from './AgentProfilePanel.tsx'
 import { CallControls } from '../group/CallControls.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
 import { LogsPanel } from '../shared/LogsPanel.tsx'
@@ -87,6 +88,7 @@ export function ChatPage({ id }: ChatPageProps) {
     } catch (err) {
       console.error('Failed to end call', err)
     }
+    activeCall.value = null
   }
 
   const handleToggleMode = () => {
@@ -127,25 +129,22 @@ export function ChatPage({ id }: ChatPageProps) {
           <Spinner />
         </div>
       ) : (
-        <>
-          <MessageList messages={conv.messages} />
-          {call && mode === 'voice' ? (
-            <CallControls
-              onToggleMic={toggleMic}
-              onEndCall={handleEndCall}
-              onToggleMode={handleToggleMode}
-            />
-          ) : (
-            <ChatInput onSend={handleSend} placeholder={`Message ${agent?.name ?? 'agent'}...`} />
-          )}
-          {call && mode === 'text' && (
-            <CallControls
-              onToggleMic={toggleMic}
-              onEndCall={handleEndCall}
-              onToggleMode={handleToggleMode}
-            />
-          )}
-        </>
+        <div class="flex-1 flex overflow-hidden">
+          <div class="flex-1 flex flex-col min-w-0">
+            <MessageList messages={conv.messages} />
+            {(!call || mode === 'text') && (
+              <ChatInput onSend={handleSend} placeholder={`Message ${agent?.name ?? 'agent'}...`} />
+            )}
+            {call && (
+              <CallControls
+                onToggleMic={toggleMic}
+                onEndCall={handleEndCall}
+                onToggleMode={handleToggleMode}
+              />
+            )}
+          </div>
+          {agent && <AgentProfilePanel agent={agent} />}
+        </div>
       )}
       <LogsPanel open={logsOpen} onClose={() => setLogsOpen(false)} entries={logEntries} />
     </>

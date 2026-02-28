@@ -8,10 +8,9 @@ const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
 
 interface AgentCardProps {
   agent: Agent
-  onViewProfile: (agent: Agent) => void
 }
 
-export function AgentCard({ agent, onViewProfile }: AgentCardProps) {
+export function AgentCard({ agent }: AgentCardProps) {
   const startChat = async () => {
     if (USE_MOCKS) {
       const mockConv = {
@@ -38,7 +37,10 @@ export function AgentCard({ agent, onViewProfile }: AgentCardProps) {
   }
 
   return (
-    <div class="glass rounded-2xl p-4 hover:-translate-y-1 hover:glow-soft transition-all duration-200 group">
+    <div
+      onClick={startChat}
+      class="glass rounded-2xl p-4 hover:-translate-y-1 hover:glow-soft transition-all duration-200 cursor-pointer"
+    >
       <div class="flex items-start gap-3">
         <Avatar name={agent.name} src={agent.avatar} size="lg" />
         <div class="min-w-0 flex-1">
@@ -56,20 +58,6 @@ export function AgentCard({ agent, onViewProfile }: AgentCardProps) {
             {tool}
           </span>
         ))}
-      </div>
-      <div class="mt-4 flex gap-2">
-        <button
-          onClick={startChat}
-          class="flex-1 px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-sm rounded-xl transition-colors"
-        >
-          Message
-        </button>
-        <button
-          onClick={() => onViewProfile(agent)}
-          class="px-3 py-1.5 glass hover:bg-white/10 text-white/70 text-sm rounded-xl transition-colors"
-        >
-          Profile
-        </button>
       </div>
     </div>
   )
