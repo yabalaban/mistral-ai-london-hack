@@ -1,13 +1,10 @@
 """Oracle engine for group conversations.
 
 The oracle is the invisible intelligence behind group chats. It:
-1. Reads the room — who's spoken, what's been said, what's missing
-2. Picks the best next speaker with a specific directive
-3. Decides when the conversation round is complete
-4. Provides its reasoning as a visible transcript for the UI
-
-Each agent gets their own Mistral Conversation for persistent memory.
-The oracle injects group context so agents build on each other's points.
+1. Reads the room and picks the best next speaker
+2. Grades user messages to extract a thread topic (when one emerges)
+3. Keeps conversation focused on the topic once set
+4. Provides reasoning as a visible transcript for the UI
 """
 
 from __future__ import annotations
@@ -42,27 +39,25 @@ You are the Oracle — invisible moderator for a group thread.
 {participants}
 
 ## How to Moderate
-This is a natural group thread — like humans chatting. NOT a panel discussion.
+This is a natural group thread — like humans chatting, not a panel discussion.
 
-**Greetings/small talk** ("hey", "what's up"): Pick ONE person to respond casually. Then IMMEDIATELY set done=true. Do NOT let others pile on. One "hey" back is enough. No follow-up questions, no hot takes, no tangents.
+Pick the most relevant person to respond. Only add more speakers if they have \
+something genuinely different to contribute. Not everyone needs to talk every time.
 
-**Real questions/topics**: Pick the most relevant person. Only add more speakers if they have something genuinely different to add. 2-3 speakers max per round usually. Not everyone needs to talk every time.
+Give specific directives: "challenge the scaling assumption" not "share your thoughts".
 
-**Directives**: Be specific. "Challenge Emma's scaling assumption" not "share your thoughts". Keep the thread focused on the topic.
+Keep the thread on topic. If the topic is "General discussion" (not yet set), \
+let the conversation flow naturally until one emerges.
 
-**When to stop** (done=true):
-- After greetings — one casual reply is enough
-- When the key perspectives are covered — don't force participation
-- When someone gave a complete answer and nobody would naturally add to it
+Set done=true when key perspectives are covered or when no one would naturally add to it.
 
 ## Response Format (JSON)
 {{
-  "reasoning": "<1 sentence — why this person>",
+  "reasoning": "<1 sentence>",
   "next_speaker": "<agent_id or null if done>",
-  "hint": "<specific directive or 'casual' for small talk>",
+  "hint": "<specific directive>",
   "done": false
 }}
-\
 """
 
 AGENT_CONTEXT_TEMPLATE = """\
@@ -72,7 +67,22 @@ AGENT_CONTEXT_TEMPLATE = """\
 
 [→ {name}]: {hint}
 
-Reply like a human in a group chat. 1-2 sentences. No walls of text. No bullet points unless asked. Don't repeat others. Don't ask follow-up questions unless the topic demands it.\
+Reply like a human in a group chat. 1-2 sentences. No walls of text. \
+No bullet points unless asked. Don't repeat others. \
+Don't ask follow-up questions unless the topic demands it.\
+"""
+
+TOPIC_GRADER_SYSTEM = """\
+You grade whether a set of user messages contains a clear discussion topic.
+
+Rules:
+- Greetings, small talk, and casual messages are NOT topics ("hey", "what's up", "how are you")
+- A topic is a specific subject the user wants to discuss or get help with
+- The topic should be a concise summary (1 short sentence), not the raw message
+- If no clear topic yet, return null
+
+Return JSON:
+{"has_topic": true/false, "topic": "<summary>" or null}
 """
 
 
@@ -92,29 +102,20 @@ class OracleEngine:
         """Pick the next agent to speak.
 
         Returns (agent_id | None, hint, reasoning, done).
-        agent_id is None when done=True.
         """
         agent_ids = conversation.participant_agent_ids
         participants = []
         for aid in agent_ids:
             agent = self._registry.get(aid)
             if agent:
-                spoken = "✓ spoken" if aid in (speakers_this_round or []) else "not yet spoken"
+                spoken = "spoken" if aid in (speakers_this_round or []) else "not yet"
                 participants.append(
-                    f"- **{aid}** ({agent.name}): {agent.role}. "
-                    f"Personality: {agent.personality[:80]}. [{spoken}]"
+                    f"- **{aid}** ({agent.name}): {agent.role}. [{spoken}]"
                 )
 
         recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
         history_lines = self._format_history(recent)
-
-        # Extract or use existing topic
-        topic = conversation.topic
-        if not topic or topic == "General discussion":
-            new_topic = await self._extract_topic(conversation)
-            if new_topic != "General discussion":
-                conversation.topic = new_topic
-            topic = new_topic
+        topic = conversation.topic or "General discussion"
 
         system = ORACLE_SYSTEM.format(
             topic=topic,
@@ -137,15 +138,13 @@ class OracleEngine:
                 messages=messages,
                 response_format={"type": "json_object"},
             )
-            text = response.choices[0].message.content.strip()
-            data = json.loads(text)
+            data = json.loads(response.choices[0].message.content.strip())
 
             done = data.get("done", False)
             next_id = data.get("next_speaker")
             hint = data.get("hint", "Share your perspective")
             reasoning = data.get("reasoning", "")
 
-            # Validate
             if done or next_id is None:
                 return None, "", reasoning, True
             if next_id not in agent_ids:
@@ -154,91 +153,43 @@ class OracleEngine:
             return next_id, hint, reasoning, False
 
         except Exception:
-            logger.exception("Oracle decision failed, picking first available")
+            logger.exception("Oracle decision failed")
             for aid in agent_ids:
                 if aid != last_speaker and aid not in (speakers_this_round or []):
-                    return aid, "Share your thoughts", "Fallback — rotating speakers", False
-            return None, "", "All participants have spoken", True
+                    return aid, "Share your thoughts", "Fallback", False
+            return None, "", "All done", True
 
-    @staticmethod
-    def _is_greeting(text: str) -> bool:
-        """Check if a message is just a greeting/small talk."""
-        normalized = text.lower().strip().rstrip("?!.,")
-        greeting_exact = {
-            "hi", "hey", "hello", "yo", "sup", "whats up", "what's up",
-            "how are you", "how's it going", "howdy", "hiya", "good morning",
-            "good evening", "good afternoon", "hey folks", "hi everyone",
-            "hey everyone", "hey guys", "hey team", "what up", "wassup",
-            "hey folks whats up", "hey folks what's up", "hi all",
-            "hey all", "morning", "evening",
-        }
-        if normalized in greeting_exact:
-            return True
-        words = normalized.split()
-        if len(words) <= 5 and any(g in normalized for g in ("hey", "hi ", "hello", "what's up", "whats up", "sup")):
-            return True
-        return False
+    async def grade_topic(self, conversation: Conversation) -> str | None:
+        """Use Mistral to grade whether user messages contain a real topic.
 
-    async def _extract_topic(self, conversation: Conversation) -> str:
-        """Extract the thread topic from early user messages.
-
-        Looks at up to the first 3 user messages and picks the most
-        substantive one as the topic. Skips greetings like 'hey' or 'hi'.
-        Falls back to an LLM call if ambiguous.
+        Returns the topic string if found, None otherwise.
+        Only looks at USER messages — agent responses don't set the topic.
         """
         user_msgs = [
             msg.content for msg in conversation.messages
             if msg.role == MessageRole.USER
-        ][:3]
-
+        ]
         if not user_msgs:
-            return "General discussion"
+            return None
 
-        # Filter out greetings and small talk
-        GREETING_PATTERNS = {
-            "hi", "hey", "hello", "yo", "sup", "whats up", "what's up",
-            "how are you", "how's it going", "howdy", "hiya", "good morning",
-            "good evening", "good afternoon", "hey folks", "hi everyone",
-            "hey everyone", "hey guys", "hey team", "what up",
-        }
-        substantive = []
-        for m in user_msgs:
-            normalized = m.lower().strip().rstrip("?!.,")
-            if normalized in GREETING_PATTERNS:
-                continue
-            # Also skip if it's just a greeting with filler
-            words = normalized.split()
-            if len(words) <= 5 and any(g in normalized for g in ("hey", "hi ", "hello", "what's up", "whats up", "sup")):
-                continue
-            if len(words) < 4:
-                continue
-            substantive.append(m)
-
-        if len(substantive) == 1:
-            return substantive[0]
-
-        if not substantive:
-            # All messages are short/greetings — no real topic yet
-            return "General discussion"
-
-        # Multiple substantive messages — ask the LLM to pick the topic
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
                 messages=[
-                    {"role": "system", "content": (
-                        "Extract the main discussion topic from these user messages. "
-                        "Return JSON: {\"topic\": \"<1 sentence summary of what the thread is about>\"}"
+                    {"role": "system", "content": TOPIC_GRADER_SYSTEM},
+                    {"role": "user", "content": "\n".join(
+                        f"Message {i+1}: {m}" for i, m in enumerate(user_msgs[-5:])
                     )},
-                    {"role": "user", "content": "\n".join(f"- {m}" for m in substantive)},
                 ],
                 response_format={"type": "json_object"},
             )
             data = json.loads(response.choices[0].message.content.strip())
-            return data.get("topic", substantive[0])
+            if data.get("has_topic") and data.get("topic"):
+                return data["topic"]
+            return None
         except Exception:
-            logger.exception("Topic extraction failed")
-            return substantive[0]
+            logger.exception("Topic grading failed")
+            return None
 
     def _format_history(self, messages: list[Message]) -> list[str]:
         """Format recent messages for oracle/agent context."""
@@ -255,18 +206,17 @@ class OracleEngine:
     def build_agent_prompt(
         self, conversation: Conversation, agent_id: str, hint: str
     ) -> str:
-        """Build a prompt for an agent with full group context."""
+        """Build a prompt for an agent with group context."""
         recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
         context_lines = self._format_history(recent)
         agent = self._registry.get(agent_id)
         name = agent.name if agent else agent_id
-
         topic = conversation.topic or "General discussion"
 
         return AGENT_CONTEXT_TEMPLATE.format(
             name=name,
             topic=topic,
-            context="\n".join(context_lines) if context_lines else "(No messages yet)",
+            context="\n".join(context_lines) if context_lines else "(empty)",
             hint=hint,
         )
 
@@ -276,15 +226,7 @@ class OracleEngine:
         content: str,
         attachments: list[Attachment] | None = None,
     ):
-        """Generator yielding events for a group conversation turn.
-
-        The oracle dynamically decides how many speakers are needed.
-        Events:
-            ("oracle", {...})      — oracle reasoning for transcript
-            ("turn_change", {...}) — agent is about to speak
-            ("chunk", {...})       — streaming text chunk
-            ("message", Message)   — completed agent message
-        """
+        """Generator yielding events for a group conversation turn."""
         user_msg = Message(
             role=MessageRole.USER,
             content=content,
@@ -292,23 +234,20 @@ class OracleEngine:
         )
         conversation.messages.append(user_msg)
 
+        # Grade topic from user messages if not set yet
+        if not conversation.topic or conversation.topic == "General discussion":
+            new_topic = await self.grade_topic(conversation)
+            if new_topic:
+                conversation.topic = new_topic
+                yield ("topic_set", {"topic": new_topic})
+
         last_speaker = None
         speakers_this_round: list[str] = []
-        topic_before = conversation.topic
 
-        # Detect if this is a greeting — hard cap at 1 speaker
-        is_greeting = self._is_greeting(content)
-        max_turns = 1 if is_greeting else MAX_SPEAKERS_PER_TURN
-
-        for turn_idx in range(max_turns):
+        for _ in range(MAX_SPEAKERS_PER_TURN):
             next_id, hint, reasoning, done = await self.decide_next_speaker(
                 conversation, last_speaker, speakers_this_round
             )
-
-            # Emit topic when first extracted (topic changed from before)
-            if conversation.topic and conversation.topic != topic_before and conversation.topic != "General discussion":
-                yield ("topic_set", {"topic": conversation.topic})
-                topic_before = conversation.topic
 
             if done or next_id is None:
                 if reasoning:
@@ -374,7 +313,7 @@ class OracleEngine:
             except Exception:
                 logger.exception("Agent %s streaming failed", next_id)
 
-        # Generate round summary if multiple agents spoke
+        # Summary if 2+ agents spoke
         if len(speakers_this_round) >= 2:
             summary = await self._generate_summary(conversation, speakers_this_round)
             if summary:
@@ -396,13 +335,11 @@ class OracleEngine:
                 model=settings.oracle_model,
                 messages=[
                     {"role": "system", "content": (
-                        "Summarize this group discussion round in 2-3 bullet points. "
-                        "Focus on key decisions, disagreements, and action items. "
-                        "Be concise and sharp. Use markdown."
+                        "Summarize this discussion round in 2-3 bullet points. "
+                        "Key decisions, disagreements, action items. Be concise."
                     )},
                     {"role": "user", "content": (
-                        f"Topic: {topic}\n"
-                        f"Speakers: {', '.join(names)}\n\n"
+                        f"Topic: {topic}\nSpeakers: {', '.join(names)}\n\n"
                         + "\n".join(history)
                     )},
                 ],
@@ -413,5 +350,5 @@ class OracleEngine:
             return None
 
     async def cleanup(self) -> None:
-        """No-op — oracle doesn't create persistent Mistral agents."""
+        """No-op."""
         pass
