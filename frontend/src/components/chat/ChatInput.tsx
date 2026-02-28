@@ -65,13 +65,13 @@ export function ChatInput({
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
-          class="flex-1 bg-transparent text-white placeholder-white/40 outline-none resize-none text-sm max-h-32"
+          class="flex-1 bg-transparent text-zinc-900 placeholder-zinc-400 outline-none resize-none text-sm max-h-32"
           style={{ minHeight: '24px' }}
         />
         <button
           onClick={handleSubmit}
           disabled={disabled || (!text.trim() && attachments.length === 0)}
-          class="p-1.5 text-accent hover:text-white disabled:text-white/40 transition-colors"
+          class="p-1.5 text-accent hover:text-accent-hover disabled:text-zinc-300 transition-colors"
         >
           <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />

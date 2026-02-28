@@ -1,15 +1,13 @@
-"""Speech-to-text: batch (Mistral Voxtral) and realtime (ElevenLabs Scribe v2)."""
+"""Speech-to-text: batch (Mistral Voxtral) and realtime (ElevenLabs SDK)."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import websockets
 from mistralai import Mistral
 from mistralai.models import File
 
@@ -17,7 +15,6 @@ from ensemble.config import settings
 
 logger = logging.getLogger(__name__)
 
-STT_MODEL = "voxtral-mini-transcribe-realtime-2602"
 STT_BATCH_MODEL = "mistral-stt-latest"
 
 
@@ -42,10 +39,8 @@ async def transcribe_file(client: Mistral, file_path: Path, language: str = "en"
 
 
 # ---------------------------------------------------------------------------
-# Realtime STT via ElevenLabs Scribe v2 WebSocket
+# Realtime STT via ElevenLabs SDK (manual commit for PTT)
 # ---------------------------------------------------------------------------
-
-SCRIBE_WS_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
 
 
 @dataclass
@@ -57,107 +52,112 @@ class TranscriptEvent:
 
 
 class RealtimeSTTSession:
-    """Manages a WebSocket connection to ElevenLabs Scribe v2 realtime STT.
+    """Manages a realtime STT session using the ElevenLabs SDK.
+
+    Uses CommitStrategy.MANUAL so we can explicitly commit on PTT release.
 
     Usage::
 
         session = RealtimeSTTSession()
         await session.connect()
-        # feed audio from mic
         await session.send_audio(pcm_base64_chunk)
-        # consume transcript events
         async for event in session.iter_events():
             ...
+        await session.commit()  # force commit on PTT release
         await session.close()
     """
 
-    def __init__(
-        self,
-        *,
-        language: str = "en",
-        vad_silence_threshold_secs: float = 1.0,
-    ) -> None:
+    def __init__(self, *, language: str = "en", on_commit: Any = None) -> None:
         self._language = language
-        self._vad_silence_threshold = vad_silence_threshold_secs
-        self._ws: Any = None
+        self._connection: Any = None
         self._queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
-        self._recv_task: asyncio.Task | None = None
         self._closed = False
+        self._last_partial_text = ""
+        self._audio_chunk_count = 0
+        self._on_commit = on_commit  # optional callback(text) on committed transcript
 
     async def connect(self) -> None:
-        """Open the WebSocket connection and start receiving."""
+        """Open the realtime STT connection via the ElevenLabs SDK."""
+        from elevenlabs import AudioFormat, CommitStrategy, ElevenLabs, RealtimeAudioOptions, RealtimeEvents
+
         if not settings.elevenlabs_api_key:
             raise RuntimeError("ELEVENLABS_API_KEY not set")
 
-        params = (
-            f"?model_id=scribe_v2"
-            f"&language_code={self._language}"
-            f"&sample_rate=16000"
-            f"&encoding=pcm_s16le"
-        )
-        headers = {"xi-api-key": settings.elevenlabs_api_key}
+        client = ElevenLabs(api_key=settings.elevenlabs_api_key)
 
-        self._ws = await websockets.connect(
-            SCRIBE_WS_URL + params,
-            additional_headers=headers,
-            ping_interval=20,
+        logger.info("STT connecting via ElevenLabs SDK (manual commit, PCM 16kHz)")
+        self._connection = await client.speech_to_text.realtime.connect(
+            RealtimeAudioOptions(
+                model_id="scribe_v2_realtime",
+                language_code=self._language,
+                audio_format=AudioFormat.PCM_16000,
+                sample_rate=16000,
+                commit_strategy=CommitStrategy.MANUAL,
+            )
         )
-        self._recv_task = asyncio.create_task(self._receive_loop())
+
+        # Register event handlers
+        def on_partial(data: Any) -> None:
+            text = data.get("text", "") if isinstance(data, dict) else getattr(data, "text", "")
+            if text:
+                self._last_partial_text = text
+                logger.info("STT partial: %s", text)
+                self._queue.put_nowait(TranscriptEvent(text=text, is_final=False))
+
+        def on_committed(data: Any) -> None:
+            text = (
+                data.get("text", "") if isinstance(data, dict) else getattr(data, "text", "")
+            ) or self._last_partial_text
+            if text:
+                logger.info("STT committed: %s", text)
+                self._queue.put_nowait(TranscriptEvent(text=text, is_final=True))
+                if self._on_commit:
+                    self._on_commit(text)
+            self._last_partial_text = ""
+
+        def on_error(error: Any) -> None:
+            logger.error("STT error: %s", error)
+
+        def on_close() -> None:
+            logger.info("STT connection closed")
+            self._queue.put_nowait(None)
+
+        self._connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, on_partial)
+        self._connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, on_committed)
+        self._connection.on(RealtimeEvents.ERROR, on_error)
+        self._connection.on(RealtimeEvents.CLOSE, on_close)
+
+        logger.info("STT connected, listening for transcripts")
 
     async def send_audio(self, pcm_base64: str) -> None:
-        """Send a base64-encoded PCM 16kHz audio chunk to ElevenLabs."""
-        if self._ws is None or self._closed:
+        """Send a base64-encoded PCM 16kHz audio chunk."""
+        if self._connection is None or self._closed:
             return
         try:
-            await self._ws.send(json.dumps({
-                "audio": pcm_base64,
-            }))
+            await self._connection.send({"audio_base_64": pcm_base64, "sample_rate": 16000})
+            self._audio_chunk_count += 1
+            if self._audio_chunk_count % 50 == 1:
+                logger.info("STT send_audio chunk #%d", self._audio_chunk_count)
         except Exception:
-            logger.debug("Failed to send audio chunk to STT WS")
+            logger.exception("Failed to send audio chunk to STT")
 
-    async def _receive_loop(self) -> None:
-        """Background task reading transcript events from ElevenLabs."""
+    async def commit(self) -> None:
+        """Force-commit the current audio segment (call on PTT release)."""
+        if self._connection is None or self._closed:
+            return
         try:
-            async for raw in self._ws:
-                if self._closed:
-                    break
-                try:
-                    msg = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-
-                msg_type = msg.get("type", "")
-
-                if msg_type == "transcript":
-                    # Partial (interim) transcript
-                    text = msg.get("channel", {}).get("alternatives", [{}])[0].get(
-                        "transcript", ""
-                    )
-                    if text:
-                        await self._queue.put(TranscriptEvent(text=text, is_final=False))
-
-                elif msg_type == "speech_final":
-                    # VAD detected end of utterance — committed transcript
-                    text = msg.get("channel", {}).get("alternatives", [{}])[0].get(
-                        "transcript", ""
-                    )
-                    if text:
-                        await self._queue.put(TranscriptEvent(text=text, is_final=True))
-
-        except websockets.ConnectionClosed:
-            logger.debug("STT WebSocket connection closed")
-        except asyncio.CancelledError:
-            pass
+            logger.info("STT committing (PTT release)")
+            await self._connection.commit()
         except Exception:
-            logger.exception("STT receive loop error")
-        finally:
-            await self._queue.put(None)  # sentinel
+            logger.exception("Failed to commit STT")
+
+    @property
+    def last_partial_text(self) -> str:
+        """The most recent partial transcript text (not yet committed)."""
+        return self._last_partial_text
 
     async def iter_events(self):
-        """Async generator yielding TranscriptEvent objects.
-
-        Yields events until the session is closed (sentinel ``None``).
-        """
+        """Async generator yielding TranscriptEvent objects."""
         while True:
             event = await self._queue.get()
             if event is None:
@@ -167,15 +167,9 @@ class RealtimeSTTSession:
     async def close(self) -> None:
         """Close the STT session and clean up."""
         self._closed = True
-        if self._recv_task and not self._recv_task.done():
-            self._recv_task.cancel()
+        if self._connection:
             try:
-                await self._recv_task
-            except asyncio.CancelledError:
-                pass
-        if self._ws:
-            try:
-                await self._ws.close()
+                await self._connection.close()
             except Exception:
                 pass
-            self._ws = None
+            self._connection = None

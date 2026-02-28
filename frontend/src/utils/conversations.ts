@@ -1,8 +1,7 @@
 import { route } from 'preact-router'
 import { createConversation } from '../api/client.ts'
 import { upsertConversation, activeConversationId } from '../state/conversations.ts'
-
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
+import { USE_MOCKS } from '../config.ts'
 
 export async function createGroupConversation(agentIds: string[]) {
   if (USE_MOCKS) {

@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.27.0",
     "websockets>=13.0",
     "playwright>=1.40.0",
+    "elevenlabs>=2.37.0",
 ]
 
 [tool.ruff]

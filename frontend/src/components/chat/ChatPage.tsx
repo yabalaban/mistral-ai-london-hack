@@ -1,11 +1,8 @@
 import { useConversation } from '../../hooks/useConversation.ts'
 import { useVoice } from '../../hooks/useVoice.ts'
-import {
-  activeConversation,
-  addOptimisticMessage,
-} from '../../state/conversations.ts'
+import { activeConversation, appendMessage } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
-import { activeCall, callMode, isMicOn, partialTranscript } from '../../state/call.ts'
+import { activeCall, callMode, partialTranscript } from '../../state/call.ts'
 import { startCall, endCall } from '../../api/client.ts'
 import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
@@ -15,9 +12,8 @@ import { AgentProfilePanel } from './AgentProfilePanel.tsx'
 import { CallControls } from '../group/CallControls.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
 import { generateId } from '../../utils/format.ts'
+import { USE_MOCKS } from '../../config.ts'
 import type { Attachment } from '../../types/index.ts'
-
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
 
 interface ChatPageProps {
   path?: string
@@ -26,7 +22,7 @@ interface ChatPageProps {
 
 export function ChatPage({ id }: ChatPageProps) {
   useConversation(id ?? '')
-  const { toggleMic } = useVoice()
+  const { startPTT, stopPTT, teardownMic } = useVoice()
 
   if (!id) return null
 
@@ -35,14 +31,13 @@ export function ChatPage({ id }: ChatPageProps) {
   const mode = callMode.value
 
   const handleSend = (content: string, attachments?: Attachment[]) => {
-    addOptimisticMessage({
+    appendMessage({
       id: generateId(),
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
       attachments,
     })
-
     if (!USE_MOCKS) {
       wsManager.send({
         type: 'message',
@@ -65,10 +60,9 @@ export function ChatPage({ id }: ChatPageProps) {
       return
     }
     try {
-      const call = await startCall(id)
-      activeCall.value = call
+      const c = await startCall(id)
+      activeCall.value = c
       callMode.value = 'voice'
-      toggleMic()
     } catch (err) {
       console.error('Failed to start call', err)
     }
@@ -79,9 +73,7 @@ export function ChatPage({ id }: ChatPageProps) {
       activeCall.value = null
       return
     }
-    if (isMicOn.value) {
-      toggleMic()
-    }
+    teardownMic()
     try {
       await endCall(id)
     } catch (err) {
@@ -97,20 +89,7 @@ export function ChatPage({ id }: ChatPageProps) {
 
   const agentId = conv?.participants.find((p) => p !== 'user')
   const agent = agentId ? agentMap.value.get(agentId) : null
-
-  let title: string
-  if (conv?.type === 'group') {
-    if (conv.topic && conv.topic !== 'General discussion') {
-      title = conv.topic.length > 60 ? conv.topic.slice(0, 57) + '...' : conv.topic
-    } else {
-      const names = conv.participants
-        .map((id) => agentMap.value.get(id)?.name ?? id)
-        .join(', ')
-      title = names
-    }
-  } else {
-    title = agent?.name ? `Chat with ${agent.name}` : 'Chat'
-  }
+  const title = agent?.name ? `Chat with ${agent.name}` : 'Chat'
 
   return (
     <>
@@ -118,7 +97,7 @@ export function ChatPage({ id }: ChatPageProps) {
         {!call ? (
           <button
             onClick={handleStartCall}
-            class="p-2 text-white/40 hover:text-accent transition-colors"
+            class="p-2 text-zinc-400 hover:text-accent transition-colors"
             title={`Call ${agent?.name ?? 'agent'}`}
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -142,13 +121,13 @@ export function ChatPage({ id }: ChatPageProps) {
           <Spinner />
         </div>
       ) : (
-        <div class="flex-1 flex overflow-hidden">
-          <div class="flex-1 flex flex-col min-w-0">
-            <div class="flex-1 overflow-hidden relative">
+        <div class="flex-1 flex overflow-hidden min-h-0">
+          <div class="flex-1 flex flex-col min-w-0 min-h-0">
+            <div class="flex-1 overflow-hidden relative min-h-0">
               <MessageList messages={conv.messages} />
               {call && mode === 'voice' && partialTranscript.value && (
-                <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-white/60 text-sm italic animate-pulse">
-                  🎤 {partialTranscript.value}
+                <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-zinc-500 text-sm italic animate-pulse">
+                  {partialTranscript.value}
                 </div>
               )}
             </div>
@@ -157,7 +136,8 @@ export function ChatPage({ id }: ChatPageProps) {
             )}
             {call && (
               <CallControls
-                onToggleMic={toggleMic}
+                onStartPTT={startPTT}
+                onStopPTT={stopPTT}
                 onEndCall={handleEndCall}
                 onToggleMode={handleToggleMode}
               />

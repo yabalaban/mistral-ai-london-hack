@@ -400,6 +400,10 @@ class VoiceSession:
         """
         from ensemble.voice.tts import TTSWebSocket
 
+        # Record user message (oracle no longer does this)
+        user_msg = Message(role=MessageRole.USER, content=text)
+        self._conv.messages.append(user_msg)
+
         msg_ids: dict[str, str] = {}
         # Per-agent TTS state for streaming audio during text generation
         current_tts: TTSWebSocket | None = None
@@ -443,9 +447,7 @@ class VoiceSession:
                     await _send(self._ws, {
                         "type": "oracle_reasoning",
                         "reasoning": data.get("reasoning", ""),
-                        "next_speaker": data.get("next_speaker"),
-                        "next_speaker_name": data.get("next_speaker_name"),
-                        "hint": data.get("hint", ""),
+                        "speakers": data.get("speakers", []),
                     })
 
                 elif event_type == "turn_change":
@@ -456,7 +458,11 @@ class VoiceSession:
 
                     agent_id = data.get("agent_id")
                     msg_ids[agent_id] = _uuid.uuid4().hex[:12]
-                    await _send(self._ws, {"type": "turn_change", "agent_id": agent_id})
+                    await _send(self._ws, {
+                        "type": "turn_change",
+                        "agent_id": agent_id,
+                        "reply_to_id": data.get("reply_to_id"),
+                    })
                     await _send(self._ws, {"type": "agent_speaking", "agent_id": agent_id})
 
                     # Open TTS for this agent so we can stream chunks as they arrive
@@ -509,10 +515,27 @@ class VoiceSession:
                             "role": "assistant",
                             "agent_id": agent_id,
                             "content": msg.content,
+                            "reply_to_id": msg.reply_to_id,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         },
                     })
                     await _send(self._ws, {"type": "agent_done", "agent_id": agent_id})
+
+                elif event_type == "grader":
+                    await _send(self._ws, {
+                        "type": "grader",
+                        "reasoning": data.get("reasoning", ""),
+                        "done": data.get("done", True),
+                        "round": data.get("round", 1),
+                    })
+
+                elif event_type == "agent_verdict":
+                    await _send(self._ws, {
+                        "type": "agent_verdict",
+                        "agent_id": data.get("agent_id", ""),
+                        "agent_name": data.get("agent_name", ""),
+                        "verdict": data.get("verdict", ""),
+                    })
 
                 elif event_type == "summary":
                     await _send(self._ws, {
@@ -579,6 +602,7 @@ async def handle_conversation_ws(
 
     await manager.connect(conversation_id, ws)
     voice_session: VoiceSession | None = None
+    group_task: asyncio.Task | None = None
 
     try:
         while True:
@@ -592,7 +616,51 @@ async def handle_conversation_ws(
             msg_type = msg.get("type")
 
             if msg_type == "message":
-                await _handle_message(ws, conv, msg, registry, oracle, mistral_client)
+                content = msg.get("content", "")
+                raw_attachments = msg.get("attachments", [])
+                attachments = (
+                    [Attachment(**a) for a in raw_attachments] if raw_attachments else []
+                )
+
+                if not content and not attachments:
+                    await _send(ws, {"type": "error", "message": "Empty message"})
+                    continue
+
+                if conv.type == ConversationType.GROUP:
+                    # Cancel any active group round
+                    if group_task and not group_task.done():
+                        group_task.cancel()
+                        try:
+                            await group_task
+                        except asyncio.CancelledError:
+                            pass
+                        await _send(ws, {"type": "interrupt"})
+
+                    # Record user message
+                    user_msg = Message(
+                        role=MessageRole.USER,
+                        content=content,
+                        attachments=attachments,
+                    )
+                    conv.messages.append(user_msg)
+
+                    # Run new round in background so WS loop stays responsive
+                    group_task = asyncio.create_task(
+                        _handle_group_streaming(
+                            ws, conv, content, attachments, registry, oracle, mistral_client
+                        )
+                    )
+                else:
+                    # Direct chats: inline await (no interruption needed)
+                    user_msg = Message(
+                        role=MessageRole.USER,
+                        content=content,
+                        attachments=attachments,
+                    )
+                    conv.messages.append(user_msg)
+                    await _handle_direct_streaming(
+                        ws, conv, content, attachments, registry, mistral_client
+                    )
             elif msg_type == "audio":
                 await _handle_audio(ws, conv, msg, registry, oracle, mistral_client)
             elif msg_type == "voice_state":
@@ -631,42 +699,15 @@ async def handle_conversation_ws(
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for conversation %s", conversation_id)
     finally:
+        if group_task and not group_task.done():
+            group_task.cancel()
+            try:
+                await group_task
+            except asyncio.CancelledError:
+                pass
         if voice_session:
             await voice_session.stop()
         manager.disconnect(conversation_id, ws)
-
-
-async def _handle_message(
-    ws: WebSocket,
-    conv: Conversation,
-    msg: dict,
-    registry: AgentRegistry,
-    oracle: OracleEngine,
-    mistral_client: Any,
-) -> None:
-    """Handle a text message — route to agent(s) with streaming."""
-    content = msg.get("content", "")
-    raw_attachments = msg.get("attachments", [])
-    attachments = [Attachment(**a) for a in raw_attachments] if raw_attachments else []
-
-    if not content and not attachments:
-        await _send(ws, {"type": "error", "message": "Empty message"})
-        return
-
-    if conv.type == ConversationType.DIRECT:
-        # Record user message here (direct streaming doesn't do it)
-        user_msg = Message(
-            role=MessageRole.USER,
-            content=content,
-            attachments=attachments,
-        )
-        conv.messages.append(user_msg)
-        await _handle_direct_streaming(ws, conv, content, attachments, registry, mistral_client)
-    else:
-        # Group streaming handler (oracle) records the user message internally
-        await _handle_group_streaming(
-            ws, conv, content, attachments, registry, oracle, mistral_client
-        )
 
 
 async def _handle_direct_streaming(
@@ -727,9 +768,7 @@ async def _handle_group_streaming(
                 await _send(ws, {
                     "type": "oracle_reasoning",
                     "reasoning": data.get("reasoning", ""),
-                    "next_speaker": data.get("next_speaker"),
-                    "next_speaker_name": data.get("next_speaker_name"),
-                    "hint": data.get("hint", ""),
+                    "speakers": data.get("speakers", []),
                 })
 
             elif event_type == "turn_change":
@@ -738,6 +777,7 @@ async def _handle_group_streaming(
                 await _send(ws, {
                     "type": "turn_change",
                     "agent_id": agent_id,
+                    "reply_to_id": data.get("reply_to_id"),
                 })
 
             elif event_type == "chunk":
@@ -758,8 +798,25 @@ async def _handle_group_streaming(
                         "role": "assistant",
                         "agent_id": msg.agent_id,
                         "content": msg.content,
+                        "reply_to_id": msg.reply_to_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     },
+                })
+
+            elif event_type == "grader":
+                await _send(ws, {
+                    "type": "grader",
+                    "reasoning": data.get("reasoning", ""),
+                    "done": data.get("done", True),
+                    "round": data.get("round", 1),
+                })
+
+            elif event_type == "agent_verdict":
+                await _send(ws, {
+                    "type": "agent_verdict",
+                    "agent_id": data.get("agent_id", ""),
+                    "agent_name": data.get("agent_name", ""),
+                    "verdict": data.get("verdict", ""),
                 })
 
             elif event_type == "summary":
@@ -768,6 +825,9 @@ async def _handle_group_streaming(
                     "content": data.get("content", ""),
                 })
 
+    except asyncio.CancelledError:
+        logger.info("Group round interrupted by new user message")
+        raise
     except Exception:
         logger.exception("Group streaming failed")
         await _send(ws, {"type": "error", "message": "Group conversation failed"})
@@ -804,11 +864,13 @@ async def _handle_audio(
 
     await _send(ws, {"type": "transcription", "text": text})
 
-    # 2. Get agent response (reuse message handler logic)
-    await _handle_message(
-        ws, conv, {"content": text, "attachments": []},
-        registry, oracle, mistral_client,
-    )
+    # 2. Get agent response
+    user_msg = Message(role=MessageRole.USER, content=text)
+    conv.messages.append(user_msg)
+    if conv.type == ConversationType.DIRECT:
+        await _handle_direct_streaming(ws, conv, text, [], registry, mistral_client)
+    else:
+        await _handle_group_streaming(ws, conv, text, [], registry, oracle, mistral_client)
 
     # 3. TTS for the last agent message
     last_agent_msg = None

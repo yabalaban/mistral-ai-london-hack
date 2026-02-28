@@ -16,6 +16,7 @@ export interface Message {
   content: string
   timestamp: string
   attachments?: Attachment[]
+  reply_to_id?: string
 }
 
 export interface Attachment {
@@ -45,10 +46,12 @@ export interface GroupCall {
 export type WSEvent =
   | { type: 'message_chunk'; agent_id: string; content: string; message_id: string }
   | { type: 'message_complete'; message: Message }
-  | { type: 'turn_change'; agent_id: string }
-  | { type: 'oracle_reasoning'; reasoning: string; next_speaker: string; next_speaker_name: string; hint: string }
+  | { type: 'turn_change'; agent_id: string; reply_to_id?: string }
+  | { type: 'oracle_reasoning'; reasoning: string; speakers: Array<{ agent_id: string; agent_name: string; hint: string }> }
   | { type: 'topic_set'; topic: string }
   | { type: 'summary'; content: string }
+  | { type: 'grader'; reasoning: string; done: boolean; round: number }
+  | { type: 'agent_verdict'; agent_id: string; agent_name: string; verdict: 'responded' | 'passed' | 'skipped' }
   | { type: 'call_started'; call: GroupCall }
   | { type: 'call_ended'; call_id: string }
   | { type: 'audio_chunk'; agent_id: string; data: string }

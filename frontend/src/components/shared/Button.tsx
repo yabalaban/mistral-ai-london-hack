@@ -10,7 +10,7 @@ interface ButtonProps {
 
 const variants = {
   primary: 'bg-accent hover:bg-accent-hover text-white glow-accent',
-  secondary: 'glass hover:bg-white/10 text-white/70',
+  secondary: 'glass hover:bg-zinc-50 text-zinc-600',
   danger: 'bg-danger hover:bg-red-600 text-white',
 }
 

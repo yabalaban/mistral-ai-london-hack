@@ -38,6 +38,7 @@ class Message(BaseModel):
     agent_id: str | None = None  # which agent sent this (None for user)
     content: str
     attachments: list[Attachment] = []
+    reply_to_id: str | None = None  # message this is replying to
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

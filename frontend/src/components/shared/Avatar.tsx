@@ -15,12 +15,12 @@ const sizes = {
 }
 
 const colors = [
-  'bg-accent/80',
-  'bg-success/80',
-  'bg-amber-500/80',
-  'bg-rose-500/80',
-  'bg-purple-500/80',
-  'bg-teal-500/80',
+  'bg-indigo-500',
+  'bg-emerald-500',
+  'bg-amber-500',
+  'bg-rose-500',
+  'bg-purple-500',
+  'bg-teal-500',
 ]
 
 function getColor(name: string) {

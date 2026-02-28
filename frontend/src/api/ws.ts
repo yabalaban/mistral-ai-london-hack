@@ -1,9 +1,11 @@
 import type { WSEvent } from '../types/index.ts'
 import {
-  streamingMessage,
-  streamingAgentId,
+  streamingAgents,
   appendMessage,
+  commitMessage,
   updateConversationTopic,
+  revealingIds,
+  revealCallbacks,
 } from '../state/conversations.ts'
 import { activeCall, currentSpeaker, agentSpeaking, partialTranscript } from '../state/call.ts'
 import { generateId } from '../utils/format.ts'
@@ -40,7 +42,6 @@ class WebSocketManager {
 
     this.ws.onclose = (e) => {
       console.log('[WS] Disconnected', e.code, e.reason)
-      // Don't reconnect if server explicitly rejected (conversation not found)
       if (e.code === 4004) return
       if (this.currentConvId === convId) {
         this.reconnectTimer = setTimeout(() => this.connect(convId), 2000)
@@ -67,7 +68,12 @@ class WebSocketManager {
 
   send(data: Record<string, unknown>) {
     if (this.ws?.readyState === WebSocket.OPEN) {
+      if (data.type !== 'audio_stream') {
+        console.log('[WS] Send:', data.type, data)
+      }
       this.ws.send(JSON.stringify(data))
+    } else {
+      console.warn('[WS] Send DROPPED (not open):', data.type)
     }
   }
 
@@ -77,53 +83,96 @@ class WebSocketManager {
   }
 
   private dispatch(event: WSEvent) {
+    if (event.type === 'audio_chunk') {
+      console.log('[WS] Recv: audio_chunk', { agent_id: (event as any).agent_id })
+    } else {
+      console.log('[WS] Recv:', event.type, event)
+    }
+
     switch (event.type) {
-      case 'message_chunk':
-        streamingAgentId.value = event.agent_id
-        streamingMessage.value = (streamingMessage.value ?? '') + event.content
+      case 'message_chunk': {
+        const prev = streamingAgents.value.get(event.agent_id)
+        if (!prev) break // turn_change queued behind reveal — ignore silently
+        const updated = new Map(streamingAgents.value)
+        updated.set(event.agent_id, {
+          agentId: event.agent_id,
+          content: prev.content + event.content,
+          replyToId: prev.replyToId,
+        })
+        streamingAgents.value = updated
         break
+      }
       case 'message_complete':
-        streamingMessage.value = null
-        streamingAgentId.value = null
-        appendMessage(event.message)
+        commitMessage(event.message.agent_id ?? '', event.message)
         break
       case 'topic_set':
         updateConversationTopic(event.topic)
         appendMessage({
           id: generateId(),
           role: 'system',
-          content: `📌 Topic: ${event.topic}`,
+          content: `Topic: ${event.topic}`,
           timestamp: new Date().toISOString(),
         })
         break
       case 'oracle_reasoning': {
-        const reasoning = event.reasoning
-        let text: string
-        if (event.next_speaker_name && event.hint) {
-          text = `🧠 ${reasoning}\n→ ${event.next_speaker_name}: ${event.hint}`
-        } else {
-          // Oracle decided the round is done
-          text = `🧠 ${reasoning}\n✋ Round complete.`
-        }
+        const lines = event.speakers?.length
+          ? event.speakers.map((s) => `${s.agent_name}: ${s.hint}`).join('\n')
+          : 'Round complete.'
         appendMessage({
           id: generateId(),
           role: 'system',
-          content: text,
+          content: `${event.reasoning}\n${lines}`,
           timestamp: new Date().toISOString(),
         })
         break
       }
+      case 'grader': {
+        const status = event.done ? 'Complete' : 'Continuing'
+        appendMessage({
+          id: generateId(),
+          role: 'system',
+          content: `Grader (round ${event.round}): ${status} — ${event.reasoning}`,
+          timestamp: new Date().toISOString(),
+        })
+        break
+      }
+      case 'agent_verdict':
+        appendMessage({
+          id: generateId(),
+          role: 'system',
+          content: `${event.agent_name}: ${event.verdict}`,
+          timestamp: new Date().toISOString(),
+        })
+        break
       case 'summary':
         appendMessage({
           id: generateId(),
           role: 'system',
-          content: `📋 **Round Summary**\n${event.content}`,
+          content: `**Round Summary**\n${event.content}`,
           timestamp: new Date().toISOString(),
         })
         break
-      case 'turn_change':
-        currentSpeaker.value = event.agent_id
+      case 'turn_change': {
+        // Show typing indicator — but wait for any active reveal animation first
+        // so the previous bubble finishes typing out before the next one starts
+        const applyTurn = () => {
+          currentSpeaker.value = event.agent_id
+          const turnMap = new Map(streamingAgents.value)
+          turnMap.set(event.agent_id, {
+            agentId: event.agent_id,
+            content: '',
+            replyToId: event.reply_to_id,
+          })
+          streamingAgents.value = turnMap
+        }
+        if (revealingIds.size > 0) {
+          const waitFor = [...revealingIds][0]
+          revealCallbacks.set(waitFor, applyTurn)
+        } else {
+          applyTurn()
+        }
         break
+      }
       case 'call_started':
         activeCall.value = event.call
         break
@@ -135,7 +184,6 @@ class WebSocketManager {
         break
       case 'transcription':
         partialTranscript.value = null
-        // Add user's transcribed speech to the message list
         appendMessage({
           id: generateId(),
           role: 'user',
@@ -157,18 +205,17 @@ class WebSocketManager {
         currentSpeaker.value = null
         break
       case 'interrupt':
-        // Agent was interrupted — handled by useVoice to flush audio playback
         agentSpeaking.value = null
         currentSpeaker.value = null
+        streamingAgents.value = new Map()
         break
       case 'agent_interrupted':
-        // Agent-to-agent interruption
         agentSpeaking.value = null
         currentSpeaker.value = null
         appendMessage({
           id: generateId(),
           role: 'system',
-          content: `⚡ ${event.by} interrupted ${event.agent_id}`,
+          content: `${event.by} interrupted ${event.agent_id}`,
           timestamp: new Date().toISOString(),
         })
         break

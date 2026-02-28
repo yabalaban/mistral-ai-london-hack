@@ -1,12 +1,9 @@
 import { useState } from 'preact/hooks'
 import { useConversation } from '../../hooks/useConversation.ts'
 import { useVoice } from '../../hooks/useVoice.ts'
-import {
-  activeConversation,
-  addOptimisticMessage,
-} from '../../state/conversations.ts'
+import { activeConversation, appendMessage } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
-import { activeCall, callMode, isMicOn, partialTranscript } from '../../state/call.ts'
+import { activeCall, callMode, partialTranscript } from '../../state/call.ts'
 import { startCall, endCall } from '../../api/client.ts'
 import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
@@ -18,9 +15,8 @@ import { MessageList } from '../chat/MessageList.tsx'
 import { AgentPicker } from './AgentPicker.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
 import { generateId } from '../../utils/format.ts'
+import { USE_MOCKS } from '../../config.ts'
 import type { Attachment } from '../../types/index.ts'
-
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
 
 interface GroupPageProps {
   path?: string
@@ -38,6 +34,23 @@ export function GroupPage({ id }: GroupPageProps) {
   const call = activeCall.value
   const mode = callMode.value
 
+  const handleSend = (content: string, attachments?: Attachment[]) => {
+    appendMessage({
+      id: generateId(),
+      role: 'user',
+      content,
+      timestamp: new Date().toISOString(),
+      attachments,
+    })
+    if (!USE_MOCKS) {
+      wsManager.send({
+        type: 'message',
+        content,
+        attachments: attachments?.map((a) => ({ type: 'image', url: a.url })) ?? [],
+      })
+    }
+  }
+
   const handleStartCall = async () => {
     if (USE_MOCKS) {
       activeCall.value = {
@@ -51,8 +64,8 @@ export function GroupPage({ id }: GroupPageProps) {
       return
     }
     try {
-      const call = await startCall(id)
-      activeCall.value = call
+      const c = await startCall(id)
+      activeCall.value = c
       callMode.value = 'voice'
     } catch (err) {
       console.error('Failed to start call', err)
@@ -78,28 +91,10 @@ export function GroupPage({ id }: GroupPageProps) {
     callMode.value = mode === 'text' ? 'voice' : 'text'
   }
 
-  const handleSend = (content: string, attachments?: Attachment[]) => {
-    addOptimisticMessage({
-      id: generateId(),
-      role: 'user',
-      content,
-      timestamp: new Date().toISOString(),
-      attachments,
-    })
-
-    if (!USE_MOCKS) {
-      wsManager.send({
-        type: 'message',
-        content,
-        attachments: attachments?.map((a) => ({ type: 'image', url: a.url })) ?? [],
-      })
-    }
-  }
-
   if (!conv) {
     return (
       <>
-        <Header title="Group Call" />
+        <Header title="Group Chat" />
         <div class="flex-1 flex items-center justify-center">
           <Spinner />
         </div>
@@ -124,7 +119,7 @@ export function GroupPage({ id }: GroupPageProps) {
         {!call ? (
           <button
             onClick={handleStartCall}
-            class="p-2 text-white/40 hover:text-accent transition-colors"
+            class="p-2 text-zinc-400 hover:text-accent transition-colors"
             title="Call everyone"
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -144,7 +139,7 @@ export function GroupPage({ id }: GroupPageProps) {
         )}
         <button
           onClick={() => setShowPicker(true)}
-          class="p-2 text-white/40 hover:text-white transition-colors"
+          class="p-2 text-zinc-400 hover:text-zinc-700 transition-colors"
           title="Add agents"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -156,16 +151,15 @@ export function GroupPage({ id }: GroupPageProps) {
       <div class="flex-1 flex overflow-hidden min-h-0">
         <div class="flex-1 flex flex-col min-h-0">
           {call && (
-            <div class="flex-none border-b border-white/10">
+            <div class="flex-none border-b border-zinc-200">
               <ParticipantRing participantIds={participants} />
             </div>
           )}
           <div class="flex-1 overflow-hidden relative min-h-0">
             <MessageList messages={conv.messages.filter(m => m.role !== 'system')} />
-            {/* Partial transcript overlay — shows what user is currently saying */}
             {call && mode === 'voice' && partialTranscript.value && (
-              <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-white/60 text-sm italic animate-pulse">
-                🎤 {partialTranscript.value}
+              <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-zinc-500 text-sm italic animate-pulse">
+                {partialTranscript.value}
               </div>
             )}
           </div>
@@ -194,7 +188,6 @@ export function GroupPage({ id }: GroupPageProps) {
           onClose={() => setShowPicker(false)}
         />
       )}
-
     </>
   )
 }

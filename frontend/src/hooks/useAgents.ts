@@ -1,10 +1,9 @@
 import { useEffect } from 'preact/hooks'
-import { agents, agentsLoading, agentsError } from '../state/agents.ts'
+import { agents, agentsLoading } from '../state/agents.ts'
 import { fetchAgents, createConversation } from '../api/client.ts'
 import { mockAgents } from '../mocks/agents.ts'
 import { conversations, upsertConversation } from '../state/conversations.ts'
-
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
+import { USE_MOCKS } from '../config.ts'
 
 async function ensureConversations(agentList: typeof agents.value) {
   const existing = new Set(
@@ -51,7 +50,7 @@ export function useAgents() {
         await ensureConversations(data)
       })
       .catch((err) => {
-        agentsError.value = err.message
+        console.error('Failed to fetch agents, using mocks', err)
         agents.value = mockAgents
         ensureConversations(mockAgents)
       })

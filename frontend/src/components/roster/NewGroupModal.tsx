@@ -20,14 +20,14 @@ export function NewGroupModal({ onClose, onCreate }: NewGroupModalProps) {
 
   return (
     <div
-      class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50"
+      class="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
     >
       <div class="glass-strong rounded-2xl glow-soft max-w-sm w-full mx-4 p-4">
-        <h3 class="text-lg font-semibold text-white mb-1">New Group Chat</h3>
-        <p class="text-sm text-white/40 mb-3">Select agents to start a shared conversation</p>
+        <h3 class="text-lg font-semibold text-zinc-900 mb-1">New Group Chat</h3>
+        <p class="text-sm text-zinc-400 mb-3">Select agents to start a shared conversation</p>
         <div class="space-y-1 max-h-64 overflow-y-auto">
           {agents.value.map((agent) => (
             <button
@@ -35,14 +35,14 @@ export function NewGroupModal({ onClose, onCreate }: NewGroupModalProps) {
               onClick={() => toggle(agent.id)}
               class={`w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-colors ${
                 selected.has(agent.id)
-                  ? 'bg-accent/15 border border-accent/20 text-white'
-                  : 'hover:bg-white/10 text-white/70'
+                  ? 'bg-indigo-50 border border-indigo-200 text-zinc-900'
+                  : 'hover:bg-zinc-50 text-zinc-600'
               }`}
             >
               <Avatar name={agent.name} src={agent.avatar} size="sm" />
               <div class="text-left min-w-0">
                 <div class="text-sm font-medium truncate">{agent.name}</div>
-                <div class="text-xs text-white/40 truncate">{agent.role}</div>
+                <div class="text-xs text-zinc-400 truncate">{agent.role}</div>
               </div>
               {selected.has(agent.id) && (
                 <svg class="w-5 h-5 ml-auto text-accent flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">

@@ -79,17 +79,17 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
 
   return (
     <div
-      class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50"
+      class="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
     >
       <div class="glass-strong rounded-2xl glow-soft max-w-lg w-full mx-4 overflow-hidden">
-        <div class="px-6 py-4 border-b border-white/10 flex items-center justify-between">
-          <h3 class="text-lg font-semibold text-white">
+        <div class="px-6 py-4 border-b border-zinc-200 flex items-center justify-between">
+          <h3 class="text-lg font-semibold text-zinc-900">
             {step === 'template' ? 'Create Agent' : 'Customize Agent'}
           </h3>
-          <button onClick={onClose} class="text-white/40 hover:text-white transition-colors">
+          <button onClick={onClose} class="text-zinc-400 hover:text-zinc-700 transition-colors">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -102,17 +102,17 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
               <button
                 key={t.name}
                 onClick={() => selectTemplate(t)}
-                class="w-full text-left glass rounded-xl p-4 hover:bg-white/10 transition-colors"
+                class="w-full text-left glass rounded-xl p-4 hover:bg-zinc-50 transition-colors"
               >
                 <div class="flex items-start gap-3">
                   <Avatar name={t.name} size="md" />
                   <div class="min-w-0 flex-1">
-                    <div class="font-medium text-white">{t.name}</div>
+                    <div class="font-medium text-zinc-900">{t.name}</div>
                     <div class="text-sm text-accent">{t.role}</div>
-                    <p class="text-xs text-white/50 mt-1 line-clamp-2">{t.bio}</p>
+                    <p class="text-xs text-zinc-400 mt-1 line-clamp-2">{t.bio}</p>
                     <div class="flex gap-1 mt-2">
                       {t.tools.map((tool) => (
-                        <span key={tool} class="text-[10px] px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-white/40">
+                        <span key={tool} class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 border border-zinc-200 text-zinc-500">
                           {tool}
                         </span>
                       ))}
@@ -126,17 +126,17 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
                 setSelected(null)
                 setStep('customize')
               }}
-              class="w-full text-left glass rounded-xl p-4 hover:bg-white/10 transition-colors border border-dashed border-white/20"
+              class="w-full text-left glass rounded-xl p-4 hover:bg-zinc-50 transition-colors border border-dashed border-zinc-300"
             >
               <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-white/40">
+                <div class="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center text-zinc-400">
                   <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                   </svg>
                 </div>
                 <div>
-                  <div class="font-medium text-white/70">Blank Agent</div>
-                  <div class="text-xs text-white/40">Start from scratch</div>
+                  <div class="font-medium text-zinc-600">Blank Agent</div>
+                  <div class="text-xs text-zinc-400">Start from scratch</div>
                 </div>
               </div>
             </button>
@@ -144,39 +144,39 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
         ) : (
           <div class="p-6 space-y-4">
             <div>
-              <label class="text-xs font-medium text-white/40 uppercase tracking-wider">Name</label>
+              <label class="text-xs font-medium text-zinc-400 uppercase tracking-wider">Name</label>
               <input
                 value={name}
                 onInput={(e) => setName((e.target as HTMLInputElement).value)}
-                class="w-full mt-1 px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-white text-sm outline-none focus:border-accent/50 transition-colors"
+                class="w-full mt-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-zinc-900 text-sm outline-none focus:border-accent transition-colors"
                 placeholder="Agent name"
               />
             </div>
             <div>
-              <label class="text-xs font-medium text-white/40 uppercase tracking-wider">Role</label>
+              <label class="text-xs font-medium text-zinc-400 uppercase tracking-wider">Role</label>
               <input
                 value={role}
                 onInput={(e) => setRole((e.target as HTMLInputElement).value)}
-                class="w-full mt-1 px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-white text-sm outline-none focus:border-accent/50 transition-colors"
+                class="w-full mt-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-zinc-900 text-sm outline-none focus:border-accent transition-colors"
                 placeholder="e.g. Software Engineer"
               />
             </div>
             <div>
-              <label class="text-xs font-medium text-white/40 uppercase tracking-wider">Bio</label>
+              <label class="text-xs font-medium text-zinc-400 uppercase tracking-wider">Bio</label>
               <textarea
                 value={bio}
                 onInput={(e) => setBio((e.target as HTMLTextAreaElement).value)}
                 rows={2}
-                class="w-full mt-1 px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-white text-sm outline-none focus:border-accent/50 transition-colors resize-none"
+                class="w-full mt-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-zinc-900 text-sm outline-none focus:border-accent transition-colors resize-none"
                 placeholder="Short description..."
               />
             </div>
             <div>
-              <label class="text-xs font-medium text-white/40 uppercase tracking-wider">Personality</label>
+              <label class="text-xs font-medium text-zinc-400 uppercase tracking-wider">Personality</label>
               <input
                 value={personality}
                 onInput={(e) => setPersonality((e.target as HTMLInputElement).value)}
-                class="w-full mt-1 px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-white text-sm outline-none focus:border-accent/50 transition-colors"
+                class="w-full mt-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-zinc-900 text-sm outline-none focus:border-accent transition-colors"
                 placeholder="e.g. Curious, methodical"
               />
             </div>

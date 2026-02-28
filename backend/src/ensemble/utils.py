@@ -54,6 +54,17 @@ def extract_text_from_content(content: Any) -> str:
     return str(content) if content else ""
 
 
+VOICE_MODE_PREFIX = (
+    "[Voice conversation — reply in 1–2 short sentences. "
+    "Be concise, conversational, and natural. No lists, no markdown, no long explanations.]\n\n"
+)
+
+
+def build_voice_inputs(content: str) -> str:
+    """Wrap user content with voice-mode brevity instructions."""
+    return VOICE_MODE_PREFIX + content
+
+
 def build_inputs(
     content: str, attachments: list | None = None
 ) -> str | list[dict]:

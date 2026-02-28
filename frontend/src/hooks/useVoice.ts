@@ -1,18 +1,15 @@
 import { useEffect, useRef, useCallback } from 'preact/hooks'
-import { isMicOn, agentSpeaking, partialTranscript } from '../state/call.ts'
+import { agentSpeaking, partialTranscript, isPTTActive, activeCall, callMode } from '../state/call.ts'
 import { wsManager } from '../api/ws.ts'
 import { useWebSocket } from './useWebSocket.ts'
 import type { WSEvent } from '../types/index.ts'
 
 /**
- * PCM 16kHz audio capture and real-time voice streaming.
+ * Push-to-talk voice capture and playback.
  *
- * Instead of MediaRecorder (WebM blobs), this uses a ScriptProcessorNode
- * to capture raw PCM at 16kHz, converts float32→int16→base64, and streams
- * continuously via WebSocket as `audio_stream` events.
- *
- * Voice state is managed via `voice_state` messages to the server,
- * which controls the ElevenLabs STT session lifecycle.
+ * Mic hardware is set up once (on first PTT press) and stays active.
+ * Audio only streams to the server while PTT is held down.
+ * On release, the server commits the partial transcript and triggers the response.
  */
 
 const TARGET_SAMPLE_RATE = 16000
@@ -53,9 +50,9 @@ export function useVoice() {
   const audioCtxRef = useRef<AudioContext | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
-  const playQueueRef = useRef<ArrayBuffer[]>([])
-  const isPlayingRef = useRef(false)
-  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null)
+  const scheduledSourcesRef = useRef<AudioBufferSourceNode[]>([])
+  const nextStartTimeRef = useRef(0)
+  const decodeChainRef = useRef<Promise<void>>(Promise.resolve())
 
   const getAudioContext = () => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
@@ -64,57 +61,45 @@ export function useVoice() {
     return audioCtxRef.current
   }
 
-  const playNext = useCallback(() => {
-    const ctx = getAudioContext()
-    const data = playQueueRef.current.shift()
-    if (!data) {
-      isPlayingRef.current = false
-      currentSourceRef.current = null
-      return
-    }
-    isPlayingRef.current = true
-    ctx.decodeAudioData(
-      data,
-      (buffer) => {
-        const source = ctx.createBufferSource()
-        source.buffer = buffer
-        source.connect(ctx.destination)
-        source.onended = playNext
-        currentSourceRef.current = source
-        source.start()
-      },
-      (err) => {
-        console.error('[Voice] Failed to decode audio chunk', err)
-        playNext() // skip bad chunk, continue playback
-      },
-    )
-  }, [])
-
   const enqueueAudio = useCallback(
     (base64: string) => {
+      const ctx = getAudioContext()
       const binary = atob(base64)
       const bytes = new Uint8Array(binary.length)
       for (let i = 0; i < binary.length; i++) {
         bytes[i] = binary.charCodeAt(i)
       }
-      playQueueRef.current.push(bytes.buffer)
-      if (!isPlayingRef.current) playNext()
+      const arrayBuf = bytes.buffer
+
+      // Chain decodes sequentially so chunks are always scheduled in arrival order
+      decodeChainRef.current = decodeChainRef.current.then(() =>
+        ctx.decodeAudioData(arrayBuf).then((buffer) => {
+          const source = ctx.createBufferSource()
+          source.buffer = buffer
+          source.connect(ctx.destination)
+          const startAt = Math.max(nextStartTimeRef.current, ctx.currentTime)
+          source.start(startAt)
+          nextStartTimeRef.current = startAt + buffer.duration
+          scheduledSourcesRef.current.push(source)
+          source.onended = () => {
+            const idx = scheduledSourcesRef.current.indexOf(source)
+            if (idx >= 0) scheduledSourcesRef.current.splice(idx, 1)
+          }
+        }).catch(() => {
+          // skip bad chunk
+        })
+      )
     },
-    [playNext],
+    [],
   )
 
   const flushPlayback = useCallback(() => {
-    // Stop current audio and clear queue
-    if (currentSourceRef.current) {
-      try {
-        currentSourceRef.current.stop()
-      } catch {
-        // already stopped
-      }
-      currentSourceRef.current = null
+    for (const source of scheduledSourcesRef.current) {
+      try { source.stop() } catch { /* already stopped */ }
     }
-    playQueueRef.current = []
-    isPlayingRef.current = false
+    scheduledSourcesRef.current = []
+    nextStartTimeRef.current = 0
+    decodeChainRef.current = Promise.resolve()
   }, [])
 
   useWebSocket(
@@ -123,11 +108,9 @@ export function useVoice() {
         if (event.type === 'audio_chunk') {
           enqueueAudio(event.data)
         } else if (event.type === 'interrupt') {
-          // User interrupted agent — flush all audio
           flushPlayback()
           agentSpeaking.value = null
         } else if (event.type === 'agent_interrupted') {
-          // Agent-to-agent interruption — flush audio
           flushPlayback()
         }
       },
@@ -135,84 +118,124 @@ export function useVoice() {
     ),
   )
 
-  const toggleMic = useCallback(async () => {
-    if (isMicOn.value) {
-      // Stop recording and close voice session
-      wsManager.send({ type: 'voice_state', active: false })
+  /** Ensure mic hardware is set up (called on first PTT press). */
+  const ensureMic = useCallback(async () => {
+    if (streamRef.current) return // already set up
 
-      if (processorRef.current) {
-        processorRef.current.disconnect()
-        processorRef.current = null
-      }
-      if (sourceRef.current) {
-        sourceRef.current.disconnect()
-        sourceRef.current = null
-      }
-      streamRef.current?.getTracks().forEach((t) => t.stop())
-      streamRef.current = null
+    console.log('[Voice] Requesting microphone access...')
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    })
+    streamRef.current = stream
 
-      isMicOn.value = false
-      partialTranscript.value = null
-      return
+    const ctx = getAudioContext()
+    const source = ctx.createMediaStreamSource(stream)
+    sourceRef.current = source
+
+    const processor = ctx.createScriptProcessor(BUFFER_SIZE, 1, 1)
+    processorRef.current = processor
+
+    processor.onaudioprocess = (e) => {
+      const inputData = e.inputBuffer.getChannelData(0)
+
+      // Only send audio while PTT is held
+      if (!isPTTActive.value) return
+
+      const downsampled = downsample(inputData, ctx.sampleRate, TARGET_SAMPLE_RATE)
+      const int16 = float32ToInt16(downsampled)
+      const base64 = int16ToBase64(int16)
+
+      wsManager.send({ type: 'audio_stream', data: base64 })
     }
 
+    source.connect(processor)
+    processor.connect(ctx.destination)
+
+    console.log('[Voice] Mic ready, PTT mode')
+  }, [])
+
+  /** Start push-to-talk (pointer down). */
+  const startPTT = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      })
-      streamRef.current = stream
-
-      const ctx = getAudioContext()
-      const source = ctx.createMediaStreamSource(stream)
-      sourceRef.current = source
-
-      // ScriptProcessorNode for raw PCM access
-      const processor = ctx.createScriptProcessor(BUFFER_SIZE, 1, 1)
-      processorRef.current = processor
-
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0)
-
-        // Downsample to 16kHz and convert to int16 PCM
-        const downsampled = downsample(inputData, ctx.sampleRate, TARGET_SAMPLE_RATE)
-        const int16 = float32ToInt16(downsampled)
-        const base64 = int16ToBase64(int16)
-
-        // Send continuous audio stream
-        wsManager.send({ type: 'audio_stream', data: base64 })
-      }
-
-      source.connect(processor)
-      processor.connect(ctx.destination) // Required for ScriptProcessor to work
-
-      // Tell server to start STT session
-      wsManager.send({ type: 'voice_state', active: true })
-
-      isMicOn.value = true
+      await ensureMic()
     } catch (err) {
       console.error('[Voice] Failed to get microphone', err)
+      return
     }
+    isPTTActive.value = true
+    partialTranscript.value = null
+    wsManager.send({ type: 'voice_state', active: true })
+    console.log('[Voice] PTT started')
+  }, [ensureMic])
+
+  /** Stop push-to-talk (pointer up) — server commits partial transcript. */
+  const stopPTT = useCallback(() => {
+    if (!isPTTActive.value) return
+    isPTTActive.value = false
+    wsManager.send({ type: 'voice_state', active: false })
+    console.log('[Voice] PTT released')
   }, [])
+
+  /** Tear down mic hardware (called on end call). */
+  const teardownMic = useCallback(() => {
+    isPTTActive.value = false
+    if (processorRef.current) {
+      processorRef.current.disconnect()
+      processorRef.current = null
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect()
+      sourceRef.current = null
+    }
+    streamRef.current?.getTracks().forEach((t) => t.stop())
+    streamRef.current = null
+    partialTranscript.value = null
+  }, [])
+
+  // Spacebar push-to-talk: hold space to talk, release to send
+  useEffect(() => {
+    const isInputFocused = () => {
+      const tag = document.activeElement?.tagName
+      return tag === 'INPUT' || tag === 'TEXTAREA' || (document.activeElement as HTMLElement)?.isContentEditable
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.repeat) return
+      if (!activeCall.value || callMode.value !== 'voice') return
+      if (isInputFocused()) return
+      e.preventDefault()
+      startPTT()
+    }
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return
+      if (!activeCall.value || callMode.value !== 'voice') return
+      if (isInputFocused()) return
+      e.preventDefault()
+      stopPTT()
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [startPTT, stopPTT])
 
   useEffect(() => {
     return () => {
-      if (processorRef.current) {
-        processorRef.current.disconnect()
-      }
-      if (sourceRef.current) {
-        sourceRef.current.disconnect()
-      }
-      streamRef.current?.getTracks().forEach((t) => t.stop())
+      teardownMic()
       if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
         audioCtxRef.current.close()
       }
     }
-  }, [])
+  }, [teardownMic])
 
-  return { toggleMic, flushPlayback }
+  return { startPTT, stopPTT, teardownMic, flushPlayback }
 }

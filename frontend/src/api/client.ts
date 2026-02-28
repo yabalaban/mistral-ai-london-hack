@@ -1,3 +1,19 @@
+/**
+ * Backend REST API client.
+ *
+ * Base URL: /api (proxied by Vite to backend :8000)
+ *
+ * Endpoints:
+ *   GET    /api/agents                          → Agent[]
+ *   GET    /api/conversations/:id               → Conversation
+ *   POST   /api/conversations  {type, participants}  → Conversation
+ *   POST   /api/conversations/:id/call          → GroupCall
+ *   DELETE /api/conversations/:id/call          → GroupCall
+ *
+ * WebSocket:
+ *   ws://host/ws/conversations/:id  (see ws.ts for protocol)
+ */
+
 import type { Agent, Conversation, GroupCall } from '../types/index.ts'
 
 const BASE = '/api'
@@ -17,10 +33,6 @@ export function fetchAgents(): Promise<Agent[]> {
 
 export function fetchConversation(id: string): Promise<Conversation> {
   return request(`/conversations/${id}`)
-}
-
-export function fetchConversations(): Promise<Conversation[]> {
-  return request('/conversations')
 }
 
 export function createConversation(

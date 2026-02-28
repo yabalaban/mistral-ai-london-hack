@@ -68,10 +68,17 @@ class AgentRegistry:
                     if t in BUILT_IN_TOOLS
                 ] or None
 
+                full_instructions = (
+                    f"[Identity: {profile.name} — {profile.role}]\n"
+                    f"[Bio: {profile.bio}]\n"
+                    f"[Personality: {profile.personality}]\n\n"
+                    f"{profile.instructions}"
+                )
+
                 result = await self._client.beta.agents.create_async(
                     model=profile.model,
                     name=profile.name,
-                    instructions=profile.instructions,
+                    instructions=full_instructions,
                     description=profile.bio,
                     tools=tools,
                 )

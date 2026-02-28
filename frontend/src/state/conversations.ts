@@ -3,13 +3,25 @@ import type { Conversation, Message } from '../types/index.ts'
 
 export const conversations = signal<Conversation[]>([])
 export const activeConversationId = signal<string | null>(null)
-export const streamingMessage = signal<string | null>(null)
-export const streamingAgentId = signal<string | null>(null)
+
+/** Per-agent streaming state — tracks who is typing and accumulates content. */
+export interface StreamingEntry {
+  agentId: string
+  content: string
+  replyToId?: string
+}
+export const streamingAgents = signal<Map<string, StreamingEntry>>(new Map())
 
 export const activeConversation = computed(() => {
   const id = activeConversationId.value
   if (!id) return null
   return conversations.value.find((c) => c.id === id) ?? null
+})
+
+export const messageMap = computed(() => {
+  const conv = activeConversation.value
+  if (!conv) return new Map<string, Message>()
+  return new Map(conv.messages.map((m) => [m.id, m]))
 })
 
 export function upsertConversation(conv: Conversation) {
@@ -34,8 +46,43 @@ export function appendMessage(message: Message) {
   })
 }
 
-export function addOptimisticMessage(message: Message) {
+/**
+ * IDs of messages that should play the reveal (typewriter) animation.
+ * Non-reactive — consumed once on MessageBubble mount.
+ */
+export const revealingIds = new Set<string>()
+
+/** Callbacks waiting for a reveal animation to finish. */
+export const revealCallbacks = new Map<string, () => void>()
+
+/**
+ * Commit a completed agent message: remove from streaming state and
+ * append to conversation. Called on message_complete (text) and will
+ * be called on voice drain completion for interruption support.
+ */
+export function commitMessage(agentId: string, message: Message) {
+  const next = new Map(streamingAgents.value)
+  next.delete(agentId)
+  streamingAgents.value = next
+  revealingIds.add(message.id)
   appendMessage(message)
+}
+
+/** Called by MessageBubble when reveal animation finishes. */
+export function onRevealComplete(messageId: string) {
+  revealingIds.delete(messageId)
+  const cb = revealCallbacks.get(messageId)
+  if (cb) {
+    revealCallbacks.delete(messageId)
+    cb()
+  }
+}
+
+/** Discard an agent's in-progress stream without committing. */
+export function discardStream(agentId: string) {
+  const next = new Map(streamingAgents.value)
+  next.delete(agentId)
+  streamingAgents.value = next
 }
 
 export function updateConversationTopic(topic: string) {

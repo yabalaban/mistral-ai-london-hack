@@ -1,4 +1,4 @@
-"""Text-to-speech using ElevenLabs — batch HTTP and realtime WebSocket streaming."""
+"""Text-to-speech using ElevenLabs — SDK for batch, WebSocket for streaming."""
 
 from __future__ import annotations
 
@@ -8,44 +8,40 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-import httpx
 import websockets
 
 from ensemble.config import settings
 
 logger = logging.getLogger(__name__)
 
-ELEVENLABS_API = "https://api.elevenlabs.io/v1"
 DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # Rachel — fallback
+DEFAULT_MODEL = "eleven_flash_v2_5"  # lowest latency model
 
 
 async def synthesize(
     text: str,
     voice_id: str = "",
-    model_id: str = "eleven_turbo_v2_5",
+    model_id: str = DEFAULT_MODEL,
 ) -> bytes:
-    """Synthesize text to audio bytes (mp3)."""
+    """Synthesize text to audio bytes using the ElevenLabs SDK."""
+    from elevenlabs.client import AsyncElevenLabs
+
     if not settings.elevenlabs_api_key:
         raise RuntimeError("ELEVENLABS_API_KEY not set")
 
+    client = AsyncElevenLabs(api_key=settings.elevenlabs_api_key)
     vid = voice_id or DEFAULT_VOICE_ID
-    url = f"{ELEVENLABS_API}/text-to-speech/{vid}"
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            url,
-            headers={
-                "xi-api-key": settings.elevenlabs_api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": text,
-                "model_id": model_id,
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-            },
-        )
-        resp.raise_for_status()
-        return resp.content
+    audio_data = b""
+    audio_stream = client.text_to_speech.stream(
+        text=text,
+        voice_id=vid,
+        model_id=model_id,
+    )
+    async for chunk in audio_stream:
+        if isinstance(chunk, bytes):
+            audio_data += chunk
+    return audio_data
 
 
 # ---------------------------------------------------------------------------
@@ -58,13 +54,15 @@ TTS_WS_URL = "wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
 class TTSWebSocket:
     """Manages a WebSocket connection to ElevenLabs streaming TTS.
 
-    Sends text chunks incrementally, receives audio bytes as they are synthesized.
+    Sends text chunks incrementally (from LLM streaming), receives audio
+    bytes as they are synthesized. Uses Flash v2.5 for lowest latency and
+    aggressive chunk scheduling for fast first-byte.
     """
 
     def __init__(
         self,
         voice_id: str = "",
-        model_id: str = "eleven_turbo_v2_5",
+        model_id: str = DEFAULT_MODEL,
     ) -> None:
         self._voice_id = voice_id or DEFAULT_VOICE_ID
         self._model_id = model_id
@@ -79,25 +77,35 @@ class TTSWebSocket:
             raise RuntimeError("ELEVENLABS_API_KEY not set")
 
         url = TTS_WS_URL.format(voice_id=self._voice_id)
-        params = f"?model_id={self._model_id}"
+        params = (
+            f"?model_id={self._model_id}"
+            f"&output_format=mp3_22050_32"
+            f"&optimize_streaming_latency=4"
+        )
 
+        logger.info("TTS connecting: voice=%s model=%s", self._voice_id, self._model_id)
         self._ws = await websockets.connect(
             url + params,
             ping_interval=20,
         )
 
-        # Send initialization message
+        # Init message — aggressive chunk schedule + faster speech
         init_msg = {
             "text": " ",
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "speed": 1.15,
+            },
             "xi_api_key": settings.elevenlabs_api_key,
-            "chunk_length_schedule": [50, 120, 200, 260],
+            "chunk_length_schedule": [20, 50, 80, 120],
         }
         await self._ws.send(json.dumps(init_msg))
         self._recv_task = asyncio.create_task(self._receive_loop())
+        logger.info("TTS connected")
 
     async def send_text(self, text: str) -> None:
-        """Send a text chunk for synthesis."""
+        """Send a text chunk for synthesis. Let ElevenLabs handle buffering."""
         if self._ws is None or self._closed:
             return
         try:
@@ -108,8 +116,17 @@ class TTSWebSocket:
         except Exception:
             logger.debug("Failed to send text chunk to TTS WS")
 
+    async def flush(self) -> None:
+        """Force-generate any buffered text without closing the stream."""
+        if self._ws is None or self._closed:
+            return
+        try:
+            await self._ws.send(json.dumps({"text": " ", "flush": True}))
+        except Exception:
+            logger.debug("Failed to flush TTS")
+
     async def finish(self) -> None:
-        """Signal end of text input (flush remaining audio)."""
+        """Signal end of text input (flush remaining audio and close)."""
         if self._ws is None or self._closed:
             return
         try:
@@ -119,6 +136,8 @@ class TTSWebSocket:
 
     async def _receive_loop(self) -> None:
         """Background task reading audio chunks from ElevenLabs."""
+        chunk_count = 0
+        total_bytes = 0
         try:
             async for raw in self._ws:
                 if self._closed:
@@ -128,18 +147,25 @@ class TTSWebSocket:
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-                # ElevenLabs sends {"audio": "<base64>", "isFinal": bool, ...}
                 audio_b64 = msg.get("audio")
                 if audio_b64:
                     audio_bytes = base64.b64decode(audio_b64)
                     if audio_bytes:
+                        chunk_count += 1
+                        total_bytes += len(audio_bytes)
+                        if chunk_count <= 3 or chunk_count % 10 == 0:
+                            logger.info(
+                                "TTS audio chunk #%d: %d bytes (total: %d)",
+                                chunk_count, len(audio_bytes), total_bytes,
+                            )
                         await self._audio_queue.put(audio_bytes)
 
                 if msg.get("isFinal"):
+                    logger.info("TTS complete: %d chunks, %d bytes", chunk_count, total_bytes)
                     break
 
-        except websockets.ConnectionClosed:
-            logger.debug("TTS WebSocket connection closed")
+        except websockets.ConnectionClosed as e:
+            logger.warning("TTS WebSocket closed: code=%s reason=%s", e.code, e.reason)
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -170,11 +196,8 @@ class TTSWebSocket:
             except Exception:
                 pass
             self._ws = None
-        # Drain the queue so any waiters unblock
         while not self._audio_queue.empty():
             try:
                 self._audio_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-
-

@@ -27,7 +27,7 @@ export function ParticipantAvatar({ agent, isSpeaking, isUser = false }: Partici
           </div>
         )}
       </div>
-      <span class={`text-xs font-medium ${isSpeaking ? 'text-accent' : 'text-white/70'}`}>
+      <span class={`text-xs font-medium ${isSpeaking ? 'text-accent' : 'text-zinc-500'}`}>
         {isUser ? 'You' : agent.name}
       </span>
     </div>

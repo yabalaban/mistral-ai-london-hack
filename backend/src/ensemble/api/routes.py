@@ -125,6 +125,7 @@ def _message_to_dict(m) -> dict:
         "agent_id": m.agent_id,
         "content": m.content,
         "attachments": [a.model_dump() for a in m.attachments],
+        "reply_to_id": m.reply_to_id,
         "timestamp": m.timestamp.isoformat(),
     }
 
