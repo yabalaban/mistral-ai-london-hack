@@ -44,22 +44,20 @@ def _is_pass(text: str) -> bool:
     return s in PASS_VARIANTS or s.startswith("[pass]")
 
 
-_REPLY_PREFIX_RE = re.compile(r"^>>([a-f0-9]{8,12})\s*\n?", re.IGNORECASE)
+_REPLY_PREFIX_RE = re.compile(r"^\[(\d{1,2})\]\s*\n?")
 
 
-def _parse_reply_target(text: str, valid_ids: set[str]) -> tuple[str | None, str]:
-    """Extract >>msg_id prefix. Returns (reply_to_id | None, cleaned_text).
+def _parse_reply_target(text: str, index_map: dict[str, str]) -> tuple[str | None, str]:
+    """Extract [N] prefix and map index to real message ID.
 
-    Always strips the >> prefix if found (even if ID is invalid).
+    Returns (reply_to_id | None, cleaned_text).
+    Always strips the prefix if found.
     """
     match = _REPLY_PREFIX_RE.match(text)
     if not match:
         return None, text
-    target_id = match.group(1)
     cleaned = text[match.end():]
-    if target_id not in valid_ids:
-        return None, cleaned  # strip prefix, don't use invalid ID
-    return target_id, cleaned
+    return index_map.get(match.group(1)), cleaned
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
@@ -101,8 +99,8 @@ AGENT_CONTEXT_TEMPLATE = """\
 
 {context}
 
-Start your reply with >>ID (the ID of the message you're responding to).
-Pick the most relevant message. Default to the user's message ID if unsure.
+Start your reply with [N] where N is the message number you're responding to.
+Pick the most relevant message. Default to the user's message if unsure.
 
 Reply naturally (1-2 sentences, like a human in a group chat). \
 Don't repeat what others already said.
@@ -187,7 +185,7 @@ class OracleEngine:
     ) -> tuple[bool, str]:
         """Grade whether the conversation round is complete."""
         recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
-        history_lines = self._format_history(recent)
+        history_lines, _ = self._format_history(recent)
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
@@ -324,25 +322,41 @@ class OracleEngine:
                 return aid
         return None
 
-    def _format_history(self, messages: list[Message]) -> list[str]:
-        lines = []
+    def _format_history(
+        self, messages: list[Message],
+    ) -> tuple[list[str], dict[str, str]]:
+        """Format messages with numeric indices.
+
+        Returns (lines, index_map) where index_map maps "1","2",... to msg IDs.
+        """
+        lines: list[str] = []
+        index_map: dict[str, str] = {}
+        idx = 1
         for msg in messages:
             if msg.role == MessageRole.USER:
-                lines.append(f"[{msg.id}] **User**: {msg.content}")
+                lines.append(f"[{idx}] **User**: {msg.content}")
+                index_map[str(idx)] = msg.id
+                idx += 1
             elif msg.role == MessageRole.AGENT and msg.agent_id:
                 agent = self._registry.get(msg.agent_id)
                 name = agent.name if agent else msg.agent_id
-                lines.append(f"[{msg.id}] **{name}**: {msg.content[:400]}")
-        return lines
+                lines.append(f"[{idx}] **{name}**: {msg.content[:400]}")
+                index_map[str(idx)] = msg.id
+                idx += 1
+        return lines, index_map
 
     def _build_agent_prompt(
         self,
         conversation: Conversation,
         agent_id: str,
         hint: str | None = None,
-    ) -> str:
+    ) -> tuple[str, dict[str, str]]:
+        """Build the context prompt for an agent.
+
+        Returns (prompt, index_map) where index_map maps "1","2",... to msg IDs.
+        """
         recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
-        context_lines = self._format_history(recent)
+        context_lines, index_map = self._format_history(recent)
         agent = self._registry.get(agent_id)
         name = agent.name if agent else agent_id
 
@@ -359,7 +373,7 @@ class OracleEngine:
         topic = conversation.topic if has_topic else "none"
         hint_line = f"[Focus]: {hint}" if hint else ""
 
-        return AGENT_CONTEXT_TEMPLATE.format(
+        prompt = AGENT_CONTEXT_TEMPLATE.format(
             name=name,
             user_message=user_message,
             topic=topic,
@@ -368,12 +382,14 @@ class OracleEngine:
                 "\n".join(context_lines) if context_lines else "(empty)"
             ),
         )
+        return prompt, index_map
 
     # Public alias for ws.py voice path
     def build_agent_prompt(
         self, conversation: Conversation, agent_id: str, hint: str | None = None
     ) -> str:
-        return self._build_agent_prompt(conversation, agent_id, hint=hint)
+        prompt, _ = self._build_agent_prompt(conversation, agent_id, hint=hint)
+        return prompt
 
     def _get_ready_agents(self, conversation: Conversation) -> list[str]:
         """Return agent IDs that have a Mistral agent ready."""
@@ -701,7 +717,6 @@ class OracleEngine:
         """Agents respond one-by-one, each seeing prior responses."""
         hint_map = hint_map or {}
         current_reply_to = reply_to_id
-        valid_ids = {msg.id for msg in conversation.messages}
 
         for aid in agent_ids:
             agent = self._registry.get(aid)
@@ -709,14 +724,14 @@ class OracleEngine:
                 continue
 
             # Rebuild prompt so this agent sees previous agents' responses
-            prompt = self._build_agent_prompt(
+            prompt, index_map = self._build_agent_prompt(
                 conversation, aid, hint=hint_map.get(aid)
             )
             mistral_conv_id = conversation.mistral_conversation_ids.get(aid)
             full_text = ""
             buffered: list[str] = []
             flushed = False
-            prefix_len = 16  # >>hex12\n — enough for pass and reply prefix
+            prefix_len = 7  # [NN]\n — enough for pass and reply prefix
             agent_reply_to = current_reply_to  # fallback
 
             agent_inputs = prompt
@@ -764,7 +779,7 @@ class OracleEngine:
                                         continue
                                     # Parse >>ID prefix
                                     target, cleaned = _parse_reply_target(
-                                        full_text, valid_ids
+                                        full_text, index_map
                                     )
                                     if target:
                                         agent_reply_to = target
@@ -804,7 +819,7 @@ class OracleEngine:
                     if full_text:
                         # Parse >>ID prefix from short response
                         target, cleaned = _parse_reply_target(
-                            full_text, valid_ids
+                            full_text, index_map
                         )
                         if target:
                             agent_reply_to = target
@@ -833,7 +848,6 @@ class OracleEngine:
                         reply_to_id=agent_reply_to,
                     )
                     conversation.messages.append(msg)
-                    valid_ids.add(msg.id)
                     yield ("message", msg)
                     yield ("agent_verdict", {
                         "agent_id": aid,
@@ -857,7 +871,7 @@ class OracleEngine:
         reply_to_id: str | None,
         hint: str | None = None,
     ) -> tuple[str, bool, str | None]:
-        """Stream one agent into a queue, buffering to detect [PASS] / >>ID.
+        """Stream one agent into a queue, buffering to detect [PASS] / [N].
 
         Returns (full_text, flushed, resolved_reply_to_id).
         """
@@ -865,13 +879,12 @@ class OracleEngine:
         if not agent or not agent.mistral_agent_id:
             return "", False, reply_to_id
 
-        prompt = self._build_agent_prompt(conversation, agent_id, hint=hint)
+        prompt, index_map = self._build_agent_prompt(conversation, agent_id, hint=hint)
         mistral_conv_id = conversation.mistral_conversation_ids.get(agent_id)
         full_text = ""
         buffered: list[str] = []
         flushed = False
-        prefix_len = 16  # >>hex12\n — enough for pass and reply prefix
-        valid_ids = {msg.id for msg in conversation.messages}
+        prefix_len = 7  # [NN]\n — enough for pass and reply prefix
         agent_reply_to = reply_to_id  # fallback
 
         agent_inputs = prompt
@@ -913,7 +926,7 @@ class OracleEngine:
                                 continue
                             # Parse >>ID prefix
                             target, cleaned = _parse_reply_target(
-                                full_text, valid_ids
+                                full_text, index_map
                             )
                             if target:
                                 agent_reply_to = target
@@ -948,7 +961,7 @@ class OracleEngine:
             if full_text:
                 # Parse >>ID prefix from short response
                 target, cleaned = _parse_reply_target(
-                    full_text, valid_ids
+                    full_text, index_map
                 )
                 if target:
                     agent_reply_to = target
@@ -982,13 +995,12 @@ class OracleEngine:
         if not agent or not agent.mistral_agent_id:
             return
 
-        prompt = self._build_agent_prompt(conversation, agent_id)
+        prompt, index_map = self._build_agent_prompt(conversation, agent_id)
         mistral_conv_id = conversation.mistral_conversation_ids.get(agent_id)
         full_text = ""
         buffered: list[str] = []
         flushed = False
-        prefix_len = 16
-        valid_ids = {msg.id for msg in conversation.messages}
+        prefix_len = 7
 
         try:
             agent_inputs = prompt
@@ -1032,7 +1044,7 @@ class OracleEngine:
                             buffered.append(text)
                             if len(full_text) >= prefix_len:
                                 target, cleaned = _parse_reply_target(
-                                    full_text, valid_ids
+                                    full_text, index_map
                                 )
                                 if target:
                                     reply_to_id = target
@@ -1055,7 +1067,7 @@ class OracleEngine:
             # Handle unflushed buffer
             if not flushed and full_text:
                 target, cleaned = _parse_reply_target(
-                    full_text, valid_ids
+                    full_text, index_map
                 )
                 if target:
                     reply_to_id = target
@@ -1086,7 +1098,7 @@ class OracleEngine:
     async def _generate_summary(
         self, conversation: Conversation, speakers: list[str]
     ) -> str | None:
-        history = self._format_history(
+        history, _ = self._format_history(
             conversation.messages[-MAX_CONTEXT_MESSAGES:]
         )
         names = []
