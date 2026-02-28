@@ -7,7 +7,8 @@ import {
 } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
 import { activeCall, callMode } from '../../state/call.ts'
-import { sendMessage, startCall, endCall } from '../../api/client.ts'
+import { startCall, endCall } from '../../api/client.ts'
+import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
 import { MessageList } from './MessageList.tsx'
 import { ChatInput } from './ChatInput.tsx'
@@ -37,7 +38,7 @@ export function ChatPage({ id }: ChatPageProps) {
   const call = activeCall.value
   const mode = callMode.value
 
-  const handleSend = async (content: string, attachments?: Attachment[]) => {
+  const handleSend = (content: string, attachments?: Attachment[]) => {
     addOptimisticMessage({
       id: generateId(),
       role: 'user',
@@ -47,15 +48,11 @@ export function ChatPage({ id }: ChatPageProps) {
     })
 
     if (!USE_MOCKS) {
-      try {
-        await sendMessage(
-          id,
-          content,
-          attachments?.map((a) => ({ type: 'image', url: a.url })),
-        )
-      } catch (err) {
-        console.error('Failed to send message', err)
-      }
+      wsManager.send({
+        type: 'message',
+        content,
+        attachments: attachments?.map((a) => ({ type: 'image', url: a.url })) ?? [],
+      })
     }
   }
 
@@ -72,7 +69,8 @@ export function ChatPage({ id }: ChatPageProps) {
       return
     }
     try {
-      await startCall(id)
+      const call = await startCall(id)
+      activeCall.value = call
     } catch (err) {
       console.error('Failed to start call', err)
     }

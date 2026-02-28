@@ -7,7 +7,8 @@ import {
 } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
 import { activeCall, callMode } from '../../state/call.ts'
-import { startCall, endCall, sendMessage } from '../../api/client.ts'
+import { startCall, endCall } from '../../api/client.ts'
+import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
 import { ParticipantRing } from './ParticipantRing.tsx'
 import { GroupMessages } from './GroupMessages.tsx'
@@ -19,7 +20,6 @@ import { Spinner } from '../shared/Spinner.tsx'
 import { LogsPanel } from '../shared/LogsPanel.tsx'
 import type { LogEntry } from '../shared/LogsPanel.tsx'
 import { generateId } from '../../utils/format.ts'
-import { route } from 'preact-router'
 import type { Attachment } from '../../types/index.ts'
 
 const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true'
@@ -54,7 +54,8 @@ export function GroupPage({ id }: GroupPageProps) {
       return
     }
     try {
-      await startCall(id)
+      const call = await startCall(id)
+      activeCall.value = call
     } catch (err) {
       console.error('Failed to start call', err)
     }
@@ -77,7 +78,7 @@ export function GroupPage({ id }: GroupPageProps) {
     callMode.value = mode === 'text' ? 'voice' : 'text'
   }
 
-  const handleSend = async (content: string, attachments?: Attachment[]) => {
+  const handleSend = (content: string, attachments?: Attachment[]) => {
     addOptimisticMessage({
       id: generateId(),
       role: 'user',
@@ -87,15 +88,11 @@ export function GroupPage({ id }: GroupPageProps) {
     })
 
     if (!USE_MOCKS) {
-      try {
-        await sendMessage(
-          id,
-          content,
-          attachments?.map((a) => ({ type: 'image', url: a.url })),
-        )
-      } catch (err) {
-        console.error('Failed to send message', err)
-      }
+      wsManager.send({
+        type: 'message',
+        content,
+        attachments: attachments?.map((a) => ({ type: 'image', url: a.url })) ?? [],
+      })
     }
   }
 

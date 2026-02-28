@@ -1,4 +1,4 @@
-import type { Agent, Conversation } from '../types/index.ts'
+import type { Agent, Conversation, GroupCall } from '../types/index.ts'
 
 const BASE = '/api'
 
@@ -19,6 +19,10 @@ export function fetchConversation(id: string): Promise<Conversation> {
   return request(`/conversations/${id}`)
 }
 
+export function fetchConversations(): Promise<Conversation[]> {
+  return request('/conversations')
+}
+
 export function createConversation(
   type: 'direct' | 'group',
   participants: string[],
@@ -29,21 +33,10 @@ export function createConversation(
   })
 }
 
-export function sendMessage(
-  conversationId: string,
-  content: string,
-  attachments?: { type: 'image'; url: string }[],
-): Promise<void> {
-  return request(`/conversations/${conversationId}/messages`, {
-    method: 'POST',
-    body: JSON.stringify({ content, attachments }),
-  })
-}
-
-export function startCall(conversationId: string): Promise<void> {
+export function startCall(conversationId: string): Promise<GroupCall> {
   return request(`/conversations/${conversationId}/call`, { method: 'POST' })
 }
 
-export function endCall(conversationId: string): Promise<void> {
+export function endCall(conversationId: string): Promise<GroupCall> {
   return request(`/conversations/${conversationId}/call`, { method: 'DELETE' })
 }

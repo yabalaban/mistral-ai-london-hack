@@ -88,7 +88,9 @@ Content-Type: application/json
 {
   "id": "a1b2c3d4...",
   "type": "direct",
-  "participants": ["emma"]
+  "participants": ["emma"],
+  "messages": [],
+  "created_at": "2026-02-28T12:00:00+00:00"
 }
 ```
 
@@ -263,6 +265,36 @@ Content-Type: application/json
 Uses ElevenLabs TTS. If `voice_id` is empty, uses the default voice.
 
 **Response:** Raw MP3 audio bytes with `Content-Type: audio/mpeg`.
+
+---
+
+### Calls
+
+#### Start Call
+
+```
+POST /api/conversations/{conversation_id}/call
+```
+
+**Response:**
+```json
+{
+  "id": "abc123",
+  "conversation_id": "conv-uuid",
+  "participants": ["emma", "dan"],
+  "oracle_agent_id": "oracle",
+  "status": "active",
+  "mode": "text"
+}
+```
+
+#### End Call
+
+```
+DELETE /api/conversations/{conversation_id}/call
+```
+
+**Response:** Same shape as start, with `"status": "ended"`.
 
 ---
 
@@ -541,6 +573,27 @@ Environment variables (in `backend/.env`):
 |----------|----------|-------------|
 | `MISTRAL_API_KEY` | Yes | Mistral API key for agents, conversations, STT |
 | `ELEVENLABS_API_KEY` | No | ElevenLabs API key for TTS (voice synthesis) |
+
+---
+
+## Frontend Integration
+
+The frontend (Preact + Vite) connects to the backend via:
+
+1. **REST** for: listing agents, creating conversations, starting/ending calls, fetching slides
+2. **WebSocket** for: sending messages (text + images), receiving streamed responses, voice audio
+
+**Message flow:**
+1. Frontend loads agents via `GET /api/agents`
+2. Creates a direct conversation per agent via `POST /api/conversations`
+3. When user opens a chat, connects WebSocket to `WS /ws/conversations/{id}`
+4. User messages sent via WebSocket `{type: "message", content, attachments}`
+5. Agent responses stream back as `message_chunk` → `message_complete`
+6. Frontend renders streaming text via Preact signals
+
+**Vite proxy** (dev mode) forwards `/api/*` → `localhost:8000` and `/ws/*` → `ws://localhost:8000`.
+
+**Mock mode:** Set `VITE_USE_MOCKS=true` in `frontend/.env` to run frontend without backend.
 
 ---
 

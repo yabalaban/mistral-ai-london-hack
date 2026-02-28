@@ -77,7 +77,13 @@ async def create_conversation(req: CreateConversationRequest):
         conv = _conversation_mgr.create(req.type, req.get_participant_ids())
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"id": conv.id, "type": conv.type, "participants": conv.participant_agent_ids}
+    return {
+        "id": conv.id,
+        "type": conv.type,
+        "participants": conv.participant_agent_ids,
+        "messages": [],
+        "created_at": conv.created_at.isoformat(),
+    }
 
 
 @router.get("/conversations")
@@ -151,6 +157,39 @@ async def send_message(conversation_id: str, req: SendMessageRequest):
         except ValueError as e:
             raise HTTPException(400, str(e))
         return [_message_to_dict(r) for r in replies]
+
+
+# ── Calls ──────────────────────────────────────────────────────────────────
+
+import uuid as _uuid
+
+_active_calls: dict[str, dict] = {}
+
+
+@router.post("/conversations/{conversation_id}/call")
+async def start_call(conversation_id: str):
+    conv = _conversation_mgr.get(conversation_id)
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+    call = {
+        "id": _uuid.uuid4().hex[:12],
+        "conversation_id": conversation_id,
+        "participants": conv.participant_agent_ids,
+        "oracle_agent_id": "oracle",
+        "status": "active",
+        "mode": "text",
+    }
+    _active_calls[conversation_id] = call
+    return call
+
+
+@router.delete("/conversations/{conversation_id}/call")
+async def end_call(conversation_id: str):
+    call = _active_calls.pop(conversation_id, None)
+    if not call:
+        raise HTTPException(404, "No active call")
+    call["status"] = "ended"
+    return call
 
 
 # ── Messages with image upload ─────────────────────────────────────────
