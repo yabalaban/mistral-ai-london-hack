@@ -44,7 +44,7 @@ You are the Oracle — invisible moderator for a group thread.
 ## How to Moderate
 This is a natural group thread — like humans chatting. NOT a panel discussion.
 
-**Greetings/small talk** ("hey", "what's up"): Pick ONE person to respond casually. Set done=true after. Don't make everyone say hi — that's cringe.
+**Greetings/small talk** ("hey", "what's up"): Pick ONE person to respond casually. Then IMMEDIATELY set done=true. Do NOT let others pile on. One "hey" back is enough. No follow-up questions, no hot takes, no tangents.
 
 **Real questions/topics**: Pick the most relevant person. Only add more speakers if they have something genuinely different to add. 2-3 speakers max per round usually. Not everyone needs to talk every time.
 
@@ -72,7 +72,7 @@ AGENT_CONTEXT_TEMPLATE = """\
 
 [→ {name}]: {hint}
 
-Reply like a human in a group chat. 1-3 sentences. No walls of text. No bullet points unless specifically asked. Don't repeat others.\
+Reply like a human in a group chat. 1-2 sentences. No walls of text. No bullet points unless asked. Don't repeat others. Don't ask follow-up questions unless the topic demands it.\
 """
 
 
@@ -159,6 +159,25 @@ class OracleEngine:
                 if aid != last_speaker and aid not in (speakers_this_round or []):
                     return aid, "Share your thoughts", "Fallback — rotating speakers", False
             return None, "", "All participants have spoken", True
+
+    @staticmethod
+    def _is_greeting(text: str) -> bool:
+        """Check if a message is just a greeting/small talk."""
+        normalized = text.lower().strip().rstrip("?!.,")
+        greeting_exact = {
+            "hi", "hey", "hello", "yo", "sup", "whats up", "what's up",
+            "how are you", "how's it going", "howdy", "hiya", "good morning",
+            "good evening", "good afternoon", "hey folks", "hi everyone",
+            "hey everyone", "hey guys", "hey team", "what up", "wassup",
+            "hey folks whats up", "hey folks what's up", "hi all",
+            "hey all", "morning", "evening",
+        }
+        if normalized in greeting_exact:
+            return True
+        words = normalized.split()
+        if len(words) <= 5 and any(g in normalized for g in ("hey", "hi ", "hello", "what's up", "whats up", "sup")):
+            return True
+        return False
 
     async def _extract_topic(self, conversation: Conversation) -> str:
         """Extract the thread topic from early user messages.
@@ -277,7 +296,11 @@ class OracleEngine:
         speakers_this_round: list[str] = []
         topic_before = conversation.topic
 
-        for turn_idx in range(MAX_SPEAKERS_PER_TURN):
+        # Detect if this is a greeting — hard cap at 1 speaker
+        is_greeting = self._is_greeting(content)
+        max_turns = 1 if is_greeting else MAX_SPEAKERS_PER_TURN
+
+        for turn_idx in range(max_turns):
             next_id, hint, reasoning, done = await self.decide_next_speaker(
                 conversation, last_speaker, speakers_this_round
             )
