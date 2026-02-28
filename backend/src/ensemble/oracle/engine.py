@@ -44,7 +44,7 @@ def _is_pass(text: str) -> bool:
     return s in PASS_VARIANTS or s.startswith("[pass]")
 
 
-_REPLY_PREFIX_RE = re.compile(r"^\[(\d{1,2})\]\s*\n?")
+_REPLY_PREFIX_RE = re.compile(r"^\[(\d{1,2}|[Nn])\]\s*\n?")
 
 
 def _parse_reply_target(text: str, index_map: dict[str, str]) -> tuple[str | None, str]:
@@ -99,8 +99,8 @@ AGENT_CONTEXT_TEMPLATE = """\
 
 {context}
 
-Start your reply with [N] where N is the message number you're responding to.
-Pick the most relevant message. Default to the user's message if unsure.
+Reply to the most relevant message by starting with its number in brackets.
+For example, to reply to message [1], start with [1]. To reply to [3], start with [3].
 
 Reply naturally (1-2 sentences, like a human in a group chat). \
 Don't repeat what others already said.
