@@ -88,15 +88,30 @@ class WebSocketManager {
         break
       case 'topic_set':
         updateConversationTopic(event.topic)
-        break
-      case 'oracle_reasoning':
         appendMessage({
           id: generateId(),
           role: 'system',
-          content: `🧠 ${event.reasoning}\n→ ${event.next_speaker_name}: ${event.hint}`,
+          content: `📌 Topic: ${event.topic}`,
           timestamp: new Date().toISOString(),
         })
         break
+      case 'oracle_reasoning': {
+        const reasoning = event.reasoning
+        let text: string
+        if (event.next_speaker_name && event.hint) {
+          text = `🧠 ${reasoning}\n→ ${event.next_speaker_name}: ${event.hint}`
+        } else {
+          // Oracle decided the round is done
+          text = `🧠 ${reasoning}\n✋ Round complete.`
+        }
+        appendMessage({
+          id: generateId(),
+          role: 'system',
+          content: text,
+          timestamp: new Date().toISOString(),
+        })
+        break
+      }
       case 'turn_change':
         currentSpeaker.value = event.agent_id
         break
