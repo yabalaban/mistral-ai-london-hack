@@ -85,6 +85,8 @@ async def handle_conversation_ws(
     """Main WebSocket handler for a conversation."""
     conv = conversations.get(conversation_id)
     if not conv:
+        await ws.accept()
+        await _send(ws, {"type": "error", "message": "Conversation not found"})
         await ws.close(code=4004, reason="Conversation not found")
         return
 
