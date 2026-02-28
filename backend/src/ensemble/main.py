@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     logger.info("All agents synced to Mistral")
 
     # Wire up routes
-    routes.init(registry, conversation_mgr, oracle)
+    routes.init(registry, conversation_mgr, oracle, mistral_client=client)
 
     yield
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ensemble.conversations.models import Attachment, ConversationType
@@ -11,13 +12,15 @@ router = APIRouter(prefix="/api")
 _registry = None
 _conversation_mgr = None
 _oracle = None
+_mistral_client = None
 
 
-def init(registry, conversation_mgr, oracle):
-    global _registry, _conversation_mgr, _oracle
+def init(registry, conversation_mgr, oracle, mistral_client=None):
+    global _registry, _conversation_mgr, _oracle, _mistral_client
     _registry = registry
     _conversation_mgr = conversation_mgr
     _oracle = oracle
+    _mistral_client = mistral_client
 
 
 # ── Agents ──────────────────────────────────────────────────────────────────
@@ -157,3 +160,35 @@ async def send_message(conversation_id: str, req: SendMessageRequest):
             }
             for r in replies
         ]
+
+
+# ── Voice ──────────────────────────────────────────────────────────────────
+
+
+@router.post("/voice/transcribe")
+async def transcribe(file: UploadFile):
+    """Transcribe audio to text using Mistral Voxtral STT."""
+    from ensemble.voice.stt import transcribe_audio
+
+    if not _mistral_client:
+        raise HTTPException(500, "Mistral client not initialized")
+    audio_data = await file.read()
+    text = await transcribe_audio(_mistral_client, audio_data)
+    return {"text": text}
+
+
+class SynthesizeRequest(BaseModel):
+    text: str
+    voice_id: str = ""
+
+
+@router.post("/voice/synthesize")
+async def synthesize_endpoint(req: SynthesizeRequest):
+    """Synthesize text to speech using ElevenLabs."""
+    from ensemble.voice.tts import synthesize
+
+    try:
+        audio = await synthesize(req.text, voice_id=req.voice_id)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return Response(content=audio, media_type="audio/mpeg")

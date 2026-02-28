@@ -5,9 +5,18 @@ import logging
 from pathlib import Path
 
 from mistralai import Mistral
+from mistralai.models import (
+    CodeInterpreterTool,
+    WebSearchTool,
+)
 
 from ensemble.agents.models import AgentProfile
 from ensemble.config import settings
+
+BUILT_IN_TOOLS = {
+    "code_interpreter": CodeInterpreterTool(type="code_interpreter"),
+    "web_search": WebSearchTool(type="web_search"),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +55,19 @@ class AgentRegistry:
             if profile.mistral_agent_id:
                 continue
             try:
+                # Map tool names to Mistral tool objects
+                tools = [
+                    BUILT_IN_TOOLS[t]
+                    for t in profile.tools
+                    if t in BUILT_IN_TOOLS
+                ] or None
+
                 result = await self._client.beta.agents.create_async(
                     model=profile.model,
                     name=profile.name,
                     instructions=profile.instructions,
                     description=profile.bio,
+                    tools=tools,
                 )
                 profile.mistral_agent_id = result.id
                 logger.info(
