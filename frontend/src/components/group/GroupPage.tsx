@@ -114,7 +114,10 @@ export function GroupPage({ id }: GroupPageProps) {
     .map((id) => agentMap.value.get(id)?.name)
     .filter(Boolean)
     .join(', ')
-  const title = participantNames || 'Group Chat'
+  const topic = conv?.topic && conv.topic !== 'General discussion' ? conv.topic : null
+  const title = topic
+    ? (topic.length > 60 ? topic.slice(0, 57) + '...' : topic)
+    : (participantNames || 'Group Chat')
 
   return (
     <>

@@ -36,7 +36,9 @@ export function Sidebar() {
             const convAgents = agentIds.map((id) => agentMap.value.get(id)).filter(Boolean)
             const isGroup = conv.type === 'group'
             const label = isGroup
-              ? convAgents.map((a) => a!.name).join(', ') || truncate(conv.id, 16)
+              ? (conv.topic && conv.topic !== 'General discussion'
+                  ? truncate(conv.topic, 28)
+                  : convAgents.map((a) => a!.name).join(', ') || truncate(conv.id, 16))
               : convAgents[0]?.name ?? truncate(conv.id, 16)
 
             return (
