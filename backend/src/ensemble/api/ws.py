@@ -8,14 +8,14 @@ Protocol:
     {"type": "end_call"}
 
   Server → Client (JSON):
-    {"type": "agent_message", "agent_id": "emma", "content": "text", "done": false}
-    {"type": "agent_message", "agent_id": "emma", "content": "full text", "done": true}
-    {"type": "turn_change", "agent_id": "dan", "hint": "optional"}
-    {"type": "audio", "agent_id": "emma", "data": "<base64 mp3 audio>"}
+    {"type": "message_chunk", "agent_id": "emma", "content": "text", "message_id": "..."}
+    {"type": "message_complete", "message": {id, role, agent_id, content, timestamp}}
+    {"type": "turn_change", "agent_id": "dan"}
+    {"type": "audio_chunk", "agent_id": "emma", "data": "<base64 mp3 audio>"}
     {"type": "transcription", "text": "what the user said"}
-    {"type": "error", "detail": "what went wrong"}
-    {"type": "call_started", "mode": "text|voice"}
-    {"type": "call_ended"}
+    {"type": "error", "message": "what went wrong"}
+    {"type": "call_started", "call": {...}}
+    {"type": "call_ended", "call_id": "..."}
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ async def handle_conversation_ws(
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
-                await _send(ws, {"type": "error", "detail": "Invalid JSON"})
+                await _send(ws, {"type": "error", "message": "Invalid JSON"})
                 continue
 
             msg_type = msg.get("type")
@@ -107,11 +107,19 @@ async def handle_conversation_ws(
                 await _handle_audio(ws, conv, msg, registry, oracle, mistral_client)
             elif msg_type == "start_call":
                 mode = msg.get("mode", "text")
-                await _send(ws, {"type": "call_started", "mode": mode})
+                call_data = {
+                    "id": __import__("uuid").uuid4().hex[:12],
+                    "conversation_id": conversation_id,
+                    "participants": conv.participant_agent_ids,
+                    "oracle_agent_id": "oracle",
+                    "status": "active",
+                    "mode": mode,
+                }
+                await _send(ws, {"type": "call_started", "call": call_data})
             elif msg_type == "end_call":
-                await _send(ws, {"type": "call_ended"})
+                await _send(ws, {"type": "call_ended", "call_id": conversation_id})
             else:
-                await _send(ws, {"type": "error", "detail": f"Unknown type: {msg_type}"})
+                await _send(ws, {"type": "error", "message": f"Unknown type: {msg_type}"})
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for conversation %s", conversation_id)
@@ -133,7 +141,7 @@ async def _handle_message(
     attachments = [Attachment(**a) for a in raw_attachments] if raw_attachments else []
 
     if not content and not attachments:
-        await _send(ws, {"type": "error", "detail": "Empty message"})
+        await _send(ws, {"type": "error", "message": "Empty message"})
         return
 
     # Record user message
@@ -162,7 +170,7 @@ async def _handle_direct_streaming(
     agent_id = conv.participant_agent_ids[0]
     agent = registry.get(agent_id)
     if not agent or not agent.mistral_agent_id:
-        await _send(ws, {"type": "error", "detail": f"Agent {agent_id} not ready"})
+        await _send(ws, {"type": "error", "message": f"Agent {agent_id} not ready"})
         return
 
     inputs = build_inputs(content, attachments)
@@ -179,7 +187,7 @@ async def _handle_direct_streaming(
 
     except Exception:
         logger.exception("Streaming failed for agent %s", agent_id)
-        await _send(ws, {"type": "error", "detail": "Agent response failed"})
+        await _send(ws, {"type": "error", "message": "Agent response failed"})
 
 
 async def _handle_group_streaming(
@@ -217,7 +225,7 @@ async def _handle_group_streaming(
             last_speaker = next_id
         except Exception:
             logger.exception("Streaming failed for agent %s in group", next_id)
-            await _send(ws, {"type": "error", "detail": f"Agent {next_id} response failed"})
+            await _send(ws, {"type": "error", "message": f"Agent {next_id} response failed"})
 
 
 async def _handle_audio(
@@ -234,19 +242,19 @@ async def _handle_audio(
 
     audio_b64 = msg.get("data", "")
     if not audio_b64:
-        await _send(ws, {"type": "error", "detail": "No audio data"})
+        await _send(ws, {"type": "error", "message": "No audio data"})
         return
 
     try:
         audio_bytes = base64.b64decode(audio_b64)
     except Exception:
-        await _send(ws, {"type": "error", "detail": "Invalid base64 audio"})
+        await _send(ws, {"type": "error", "message": "Invalid base64 audio"})
         return
 
     # 1. Transcribe
     text = await transcribe_audio(mistral_client, audio_bytes)
     if not text:
-        await _send(ws, {"type": "error", "detail": "Could not transcribe audio"})
+        await _send(ws, {"type": "error", "message": "Could not transcribe audio"})
         return
 
     await _send(ws, {"type": "transcription", "text": text})
@@ -268,7 +276,7 @@ async def _handle_audio(
             audio_out = await synthesize(last_agent_msg.content, voice_id=voice_id)
             audio_out_b64 = base64.b64encode(audio_out).decode()
             await _send(ws, {
-                "type": "audio",
+                "type": "audio_chunk",
                 "agent_id": last_agent_msg.agent_id,
                 "data": audio_out_b64,
             })
@@ -299,8 +307,11 @@ async def _stream_agent_response(
       - FunctionCallEvent: agent wants to call a tool
       - ResponseDoneEvent: contains usage stats
     """
+    import uuid as _uuid
+
     full_text = ""
     has_function_call = False
+    msg_id = _uuid.uuid4().hex[:12]
 
     if mistral_conv_id:
         stream = await mistral_client.beta.conversations.append_stream_async(
@@ -331,22 +342,16 @@ async def _stream_agent_response(
             if text:
                 full_text += text
                 await _send(ws, {
-                    "type": "agent_message",
+                    "type": "message_chunk",
                     "agent_id": agent_id,
                     "content": text,
-                    "done": False,
+                    "message_id": msg_id,
                 })
 
     # If there was a function call, handle it via non-streaming path
     if has_function_call:
         mistral_conv_id = conv.mistral_conversation_ids.get(agent_id)
         if mistral_conv_id:
-            # Get the conversation history to find the function call
-            response = await mistral_client.beta.conversations.get_async(
-                conversation_id=mistral_conv_id,
-            )
-            # Re-fetch as a non-streaming append to get function call details
-            # Actually, let's use the non-streaming approach for tool calls
             response = await mistral_client.beta.conversations.append_async(
                 conversation_id=mistral_conv_id,
                 inputs="Please proceed with the tool call.",
@@ -358,18 +363,24 @@ async def _stream_agent_response(
             if tool_reply:
                 full_text = tool_reply
                 await _send(ws, {
-                    "type": "agent_message",
+                    "type": "message_chunk",
                     "agent_id": agent_id,
                     "content": tool_reply,
-                    "done": False,
+                    "message_id": msg_id,
                 })
 
-    # Send done signal with full accumulated text
+    # Send complete message
     await _send(ws, {
-        "type": "agent_message",
-        "agent_id": agent_id,
-        "content": full_text,
-        "done": True,
+        "type": "message_complete",
+        "message": {
+            "id": msg_id,
+            "role": "assistant",
+            "agent_id": agent_id,
+            "content": full_text,
+            "timestamp": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+        },
     })
 
     return full_text

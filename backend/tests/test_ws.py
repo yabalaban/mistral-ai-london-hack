@@ -36,7 +36,6 @@ def report(name: str, ok: bool, detail: str = ""):
 
 
 async def wait_for_server(timeout: float = 30):
-    """Wait until server is healthy."""
     async with httpx.AsyncClient() as client:
         for _ in range(int(timeout * 10)):
             try:
@@ -54,7 +53,6 @@ async def test_ws_direct_streaming():
     print("\n=== Test: WebSocket Direct Streaming ===")
 
     async with httpx.AsyncClient() as client:
-        # Create conversation
         resp = await client.post(
             f"{BASE}/api/conversations",
             json={"type": "direct", "participant_agent_ids": ["emma"]},
@@ -63,7 +61,6 @@ async def test_ws_direct_streaming():
         conv_id = resp.json()["id"]
         report("create conversation", True)
 
-    # Connect WebSocket
     async with websockets.connect(f"{WS_BASE}/ws/conversations/{conv_id}") as ws:
         await ws.send(json.dumps({
             "type": "message",
@@ -71,23 +68,24 @@ async def test_ws_direct_streaming():
         }))
 
         chunks = []
-        done_msg = None
+        complete_msg = None
         while True:
             raw = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
-            if raw.get("type") == "agent_message":
-                if raw.get("done"):
-                    done_msg = raw
-                    break
-                else:
-                    chunks.append(raw)
+            if raw.get("type") == "message_chunk":
+                chunks.append(raw)
+            elif raw.get("type") == "message_complete":
+                complete_msg = raw
+                break
             elif raw.get("type") == "error":
-                report("no errors", False, raw.get("detail"))
+                report("no errors", False, raw.get("message"))
                 return
 
         report("received streaming chunks", len(chunks) > 0, f"got {len(chunks)} chunks")
-        report("received done message", done_msg is not None)
-        report("done has full text", len(done_msg["content"]) > 0, done_msg["content"][:80])
-        report("agent_id is emma", done_msg["agent_id"] == "emma")
+        report("received message_complete", complete_msg is not None)
+        msg = complete_msg["message"]
+        report("message has content", len(msg["content"]) > 0, msg["content"][:80])
+        report("role is assistant", msg["role"] == "assistant")
+        report("agent_id is emma", msg["agent_id"] == "emma")
 
 
 async def test_ws_group_streaming():
@@ -110,22 +108,22 @@ async def test_ws_group_streaming():
         }))
 
         turn_changes = []
-        agent_dones = []
+        completes = []
 
-        while len(agent_dones) < 2:
+        while len(completes) < 2:
             raw = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
             if raw.get("type") == "turn_change":
                 turn_changes.append(raw)
-            elif raw.get("type") == "agent_message" and raw.get("done"):
-                agent_dones.append(raw)
+            elif raw.get("type") == "message_complete":
+                completes.append(raw)
             elif raw.get("type") == "error":
-                report("no errors", False, raw.get("detail"))
+                report("no errors", False, raw.get("message"))
                 return
 
         report("got 2 turn changes", len(turn_changes) == 2, f"got {len(turn_changes)}")
-        report("got 2 done messages", len(agent_dones) == 2, f"got {len(agent_dones)}")
+        report("got 2 complete messages", len(completes) == 2, f"got {len(completes)}")
 
-        agents = {d["agent_id"] for d in agent_dones}
+        agents = {c["message"]["agent_id"] for c in completes}
         report("both agents spoke", agents == {"emma", "dan"}, str(agents))
 
 
@@ -148,7 +146,7 @@ async def test_ws_conversation_persistence():
         }))
         while True:
             raw = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
-            if raw.get("type") == "agent_message" and raw.get("done"):
+            if raw.get("type") == "message_complete":
                 break
 
         # Second message — should remember
@@ -158,22 +156,55 @@ async def test_ws_conversation_persistence():
         }))
         while True:
             raw = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
-            if raw.get("type") == "agent_message" and raw.get("done"):
-                report("remembers context", "42" in raw["content"], raw["content"][:80])
+            if raw.get("type") == "message_complete":
+                content = raw["message"]["content"]
+                report("remembers context", "42" in content, content[:80])
                 break
 
     # Verify via REST
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{BASE}/api/conversations/{conv_id}")
         messages = resp.json()["messages"]
-        report("messages persisted", len(messages) == 4, f"got {len(messages)}")  # 2 user + 2 agent
+        report("messages persisted", len(messages) == 4, f"got {len(messages)}")
+
+
+async def test_frontend_compat():
+    """Test that API responses match frontend type expectations."""
+    print("\n=== Test: Frontend Compatibility ===")
+
+    async with httpx.AsyncClient() as client:
+        # Agents should have 'avatar' field
+        resp = await client.get(f"{BASE}/api/agents")
+        agents = resp.json()
+        report("agents have avatar field", "avatar" in agents[0], str(agents[0].keys()))
+        report("agents have tools field", "tools" in agents[0])
+
+        # Create conversation with 'participants' alias
+        resp = await client.post(
+            f"{BASE}/api/conversations",
+            json={"type": "direct", "participants": ["emma"]},
+        )
+        report("participants alias works", resp.status_code == 200, resp.text[:100])
+
+        # Messages should have role 'assistant' not 'agent'
+        conv_id = resp.json()["id"]
+
+    async with websockets.connect(f"{WS_BASE}/ws/conversations/{conv_id}") as ws:
+        await ws.send(json.dumps({"type": "message", "content": "Hi"}))
+        while True:
+            raw = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+            if raw.get("type") == "message_complete":
+                msg = raw["message"]
+                report("role is 'assistant'", msg["role"] == "assistant", msg["role"])
+                report("has timestamp", "timestamp" in msg)
+                report("has id", "id" in msg)
+                break
 
 
 async def main():
     import subprocess
     import signal
 
-    # Start server
     print("Starting server on :8765...")
     proc = subprocess.Popen(
         ["uv", "run", "uvicorn", "ensemble.main:app", "--host", "0.0.0.0", "--port", "8765"],
@@ -192,6 +223,7 @@ async def main():
             test_ws_direct_streaming,
             test_ws_group_streaming,
             test_ws_conversation_persistence,
+            test_frontend_compat,
         ]
 
         for test in tests:

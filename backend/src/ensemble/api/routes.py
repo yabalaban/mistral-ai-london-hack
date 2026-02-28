@@ -31,16 +31,7 @@ def init(registry, conversation_mgr, oracle, mistral_client=None):
 @router.get("/agents")
 async def list_agents():
     return [
-        {
-            "id": a.id,
-            "name": a.name,
-            "role": a.role,
-            "bio": a.bio,
-            "personality": a.personality,
-            "avatar_url": a.avatar_url,
-            "voice_id": a.voice_id,
-            "ready": a.mistral_agent_id is not None,
-        }
+        _agent_to_dict(a)
         for a in _registry.agents.values()
     ]
 
@@ -50,15 +41,21 @@ async def get_agent(agent_id: str):
     agent = _registry.get(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
+    return _agent_to_dict(agent)
+
+
+def _agent_to_dict(a) -> dict:
     return {
-        "id": agent.id,
-        "name": agent.name,
-        "role": agent.role,
-        "bio": agent.bio,
-        "personality": agent.personality,
-        "avatar_url": agent.avatar_url,
-        "voice_id": agent.voice_id,
-        "ready": agent.mistral_agent_id is not None,
+        "id": a.id,
+        "name": a.name,
+        "role": a.role,
+        "bio": a.bio,
+        "personality": a.personality,
+        "avatar": a.avatar_url,  # frontend expects "avatar"
+        "avatar_url": a.avatar_url,
+        "voice_id": a.voice_id,
+        "tools": a.tools,
+        "ready": a.mistral_agent_id is not None,
     }
 
 
@@ -67,13 +64,17 @@ async def get_agent(agent_id: str):
 
 class CreateConversationRequest(BaseModel):
     type: ConversationType
-    participant_agent_ids: list[str]
+    participant_agent_ids: list[str] | None = None
+    participants: list[str] | None = None  # frontend compat alias
+
+    def get_participant_ids(self) -> list[str]:
+        return self.participant_agent_ids or self.participants or []
 
 
 @router.post("/conversations")
 async def create_conversation(req: CreateConversationRequest):
     try:
-        conv = _conversation_mgr.create(req.type, req.participant_agent_ids)
+        conv = _conversation_mgr.create(req.type, req.get_participant_ids())
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"id": conv.id, "type": conv.type, "participants": conv.participant_agent_ids}
@@ -102,17 +103,20 @@ async def get_conversation(conversation_id: str):
         "id": conv.id,
         "type": conv.type,
         "participants": conv.participant_agent_ids,
-        "messages": [
-            {
-                "id": m.id,
-                "role": m.role,
-                "agent_id": m.agent_id,
-                "content": m.content,
-                "attachments": [a.model_dump() for a in m.attachments],
-                "timestamp": m.timestamp.isoformat(),
-            }
-            for m in conv.messages
-        ],
+        "messages": [_message_to_dict(m) for m in conv.messages],
+    }
+
+
+def _message_to_dict(m) -> dict:
+    """Serialize a message. Maps role 'agent' → 'assistant' for frontend compat."""
+    role = "assistant" if m.role.value == "agent" else m.role.value
+    return {
+        "id": m.id,
+        "role": role,
+        "agent_id": m.agent_id,
+        "content": m.content,
+        "attachments": [a.model_dump() for a in m.attachments],
+        "timestamp": m.timestamp.isoformat(),
     }
 
 
@@ -134,13 +138,7 @@ async def send_message(conversation_id: str, req: SendMessageRequest):
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {
-            "id": reply.id,
-            "role": reply.role,
-            "agent_id": reply.agent_id,
-            "content": reply.content,
-            "timestamp": reply.timestamp.isoformat(),
-        }
+        return _message_to_dict(reply)
     else:
         # Group conversation — oracle-driven
         try:
@@ -152,16 +150,7 @@ async def send_message(conversation_id: str, req: SendMessageRequest):
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return [
-            {
-                "id": r.id,
-                "role": r.role,
-                "agent_id": r.agent_id,
-                "content": r.content,
-                "timestamp": r.timestamp.isoformat(),
-            }
-            for r in replies
-        ]
+        return [_message_to_dict(r) for r in replies]
 
 
 # ── Messages with image upload ─────────────────────────────────────────
@@ -192,27 +181,12 @@ async def send_message_with_image(
         reply = await _conversation_mgr.send_direct_message(
             conversation_id, content, attachments or None
         )
-        return {
-            "id": reply.id,
-            "role": reply.role,
-            "agent_id": reply.agent_id,
-            "content": reply.content,
-            "timestamp": reply.timestamp.isoformat(),
-        }
+        return _message_to_dict(reply)
     else:
         replies = await _oracle.run_group_turn(
             conv, content, attachments or None, max_rounds=len(conv.participant_agent_ids)
         )
-        return [
-            {
-                "id": r.id,
-                "role": r.role,
-                "agent_id": r.agent_id,
-                "content": r.content,
-                "timestamp": r.timestamp.isoformat(),
-            }
-            for r in replies
-        ]
+        return [_message_to_dict(r) for r in replies]
 
 
 # ── Slides ─────────────────────────────────────────────────────────────────
