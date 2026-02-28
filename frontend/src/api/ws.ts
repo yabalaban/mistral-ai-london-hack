@@ -6,6 +6,7 @@ import {
   lastTranscription,
 } from '../state/conversations.ts'
 import { activeCall, currentSpeaker } from '../state/call.ts'
+import { generateId } from '../utils/format.ts'
 
 type EventHandler = (event: WSEvent) => void
 
@@ -83,6 +84,14 @@ class WebSocketManager {
         streamingMessage.value = null
         streamingAgentId.value = null
         appendMessage(event.message)
+        break
+      case 'oracle_reasoning':
+        appendMessage({
+          id: generateId(),
+          role: 'system',
+          content: `🧠 ${event.reasoning}\n→ ${event.next_speaker_name}: ${event.hint}`,
+          timestamp: new Date().toISOString(),
+        })
         break
       case 'turn_change':
         currentSpeaker.value = event.agent_id

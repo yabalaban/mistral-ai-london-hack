@@ -11,7 +11,21 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message, isStreaming = false }: MessageBubbleProps) {
   const isUser = message.role === 'user'
+  const isSystem = message.role === 'system'
   const agent = message.agent_id ? agentMap.value.get(message.agent_id) : null
+
+  // System messages (oracle reasoning) — centered, muted, compact
+  if (isSystem) {
+    return (
+      <div class="flex justify-center px-4 py-1">
+        <div class="max-w-[85%] text-center">
+          <div class="inline-block rounded-lg px-3 py-1.5 text-xs bg-white/[.04] border border-white/[.06] text-white/40 italic">
+            <span class="whitespace-pre-wrap">{message.content}</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div class={`flex gap-3 px-4 py-1 hover:bg-white/[.02] ${isUser ? 'flex-row-reverse' : ''}`}>
