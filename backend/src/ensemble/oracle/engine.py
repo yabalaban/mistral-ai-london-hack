@@ -33,7 +33,7 @@ from ensemble.utils import extract_text_from_content
 logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_MESSAGES = 15
-MAX_ROUNDS = 3
+MAX_ROUNDS = 10
 PASS_TOKEN = "[PASS]"
 PASS_VARIANTS = {"[pass]", "pass", "[pass].", "pass."}
 
@@ -63,7 +63,8 @@ def _parse_reply_target(text: str, index_map: dict[str, str]) -> tuple[str | Non
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 CLASSIFIER_SYSTEM = """\
-You classify user messages in a group chat to decide the response strategy.
+You classify user messages in a group chat to decide the response strategy, \
+and infer the user's concrete goal.
 
 **parallel** — casual, social, greetings, banter, simple acknowledgements.
 Everyone can respond at once. Examples: "hey everyone", "thanks!", "lol", \
@@ -74,21 +75,30 @@ that benefits from agents building on each other's responses.
 Examples: "generate a startup idea", "what do you think about X", \
 "can someone explain Y", "let's brainstorm"
 
+**goal** — a concise, evaluable description of what the user wants achieved.
+Examples:
+- "brainstorm 3 ideas" → "produce 3 distinct ideas with brief descriptions"
+- "hey everyone" → "greet the user"
+- "what do you think about X" → "provide opinions and analysis on X"
+- "can someone explain Y" → "explain Y clearly"
+
 Return JSON:
-{"mode": "parallel" or "sequential"}
+{"mode": "parallel" or "sequential", "goal": "<concise goal>"}
 """
 
 GRADER_SYSTEM = """\
 You are a conversation grader. Given the original user message and all agent \
 responses so far, decide if the conversation round is complete.
 
-Lean toward done — avoid unnecessary rounds. Disagreement between agents is \
+The user's goal is: {goal}
+
+Evaluate whether responses have achieved this goal. \
+Lean toward done if substantially met. Disagreement between agents is \
 fine and doesn't require resolution. Only say NOT done if a critical \
-perspective is clearly missing or the user's question wasn't adequately \
-addressed.
+aspect of the goal is clearly unaddressed.
 
 Return JSON:
-{"reasoning": "<1 sentence>", "done": true/false}
+{{"reasoning": "<1 sentence>", "done": true/false}}
 """
 
 AGENT_CONTEXT_TEMPLATE = """\
@@ -159,8 +169,12 @@ class OracleEngine:
 
     # ── LLM calls ────────────────────────────────────────────────────────
 
-    async def classify_message(self, content: str) -> str:
-        """Classify a user message as 'parallel' or 'sequential'."""
+    async def classify_message(self, content: str) -> tuple[str, str]:
+        """Classify a user message and infer goal.
+
+        Returns (mode, goal) where mode is 'parallel' or 'sequential'.
+        """
+        fallback_goal = "address the user's message"
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
@@ -174,23 +188,26 @@ class OracleEngine:
             mode = data.get("mode", "sequential")
             if mode not in ("parallel", "sequential"):
                 mode = "sequential"
-            logger.info("Classifier: %r → %s", content[:60], mode)
-            return mode
+            goal = data.get("goal") or fallback_goal
+            logger.info("Classifier: %r → %s (goal: %s)", content[:60], mode, goal)
+            return mode, goal
         except Exception:
             logger.exception("Classifier failed, defaulting to sequential")
-            return "sequential"
+            return "sequential", fallback_goal
 
     async def grade_completion(
-        self, conversation: Conversation, user_message: str
+        self, conversation: Conversation, user_message: str, goal: str = "",
     ) -> tuple[bool, str]:
-        """Grade whether the conversation round is complete."""
-        recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
-        history_lines, _ = self._format_history(recent)
+        """Grade whether the conversation round is complete against the goal."""
+        # Grader sees ALL messages (not limited to MAX_CONTEXT_MESSAGES)
+        # so it can evaluate cumulative progress toward the goal.
+        history_lines, _ = self._format_history(conversation.messages)
+        grader_prompt = GRADER_SYSTEM.format(goal=goal or "address the user's message")
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
                 messages=cast(Any, [
-                    {"role": "system", "content": GRADER_SYSTEM},
+                    {"role": "system", "content": grader_prompt},
                     {"role": "user", "content": (
                         f"User message: {user_message}\n\n"
                         "Conversation so far:\n"
@@ -490,7 +507,8 @@ class OracleEngine:
             return
 
         # --- CLASSIFY ---
-        mode = await self.classify_message(content)
+        mode, goal = await self.classify_message(content)
+        turn_record.goal = goal
         agent_ids = self._get_ready_agents(conversation)
         if not agent_ids:
             return
@@ -498,6 +516,7 @@ class OracleEngine:
         yield ("oracle_start", {
             "directed": False,
             "directed_agent": None,
+            "goal": goal,
         })
 
         speakers_so_far: list[str] = []
@@ -583,9 +602,9 @@ class OracleEngine:
                         "agent_id": ev_data["agent_id"],
                         "verdict": ev_data["verdict"],
                     }
-                    content = agent_content_map.get(ev_data["agent_id"])
-                    if content:
-                        entry["content"] = content
+                    agent_text = agent_content_map.get(ev_data["agent_id"])
+                    if agent_text:
+                        entry["content"] = agent_text
                     if ev_data.get("reply_to_id"):
                         entry["reply_to_id"] = ev_data["reply_to_id"]
                     round_record.agent_responses.append(entry)
@@ -603,7 +622,7 @@ class OracleEngine:
             # Grader (skip on last allowed round)
             if round_num < MAX_ROUNDS - 1:
                 done, reasoning = await self.grade_completion(
-                    conversation, content
+                    conversation, content, goal=goal,
                 )
                 logger.info(
                     "Grader round %d: done=%s reason=%s",

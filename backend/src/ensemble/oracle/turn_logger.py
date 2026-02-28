@@ -28,6 +28,7 @@ class TurnRecord:
     conversation_id: str
     user_message: str
     topic: str | None = None
+    goal: str | None = None
     directed: bool = False
     directed_agent: str | None = None
     rounds: list[RoundRecord] = field(default_factory=list)

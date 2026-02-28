@@ -445,6 +445,7 @@ class VoiceSession:
                         "type": "oracle_start",
                         "directed": data.get("directed", False),
                         "directed_agent": data.get("directed_agent"),
+                        "goal": data.get("goal"),
                     })
 
                 elif event_type == "oracle_end":
@@ -777,6 +778,7 @@ async def _handle_group_streaming(
                     "type": "oracle_start",
                     "directed": data.get("directed", False),
                     "directed_agent": data.get("directed_agent"),
+                    "goal": data.get("goal"),
                 })
 
             elif event_type == "oracle_end":
