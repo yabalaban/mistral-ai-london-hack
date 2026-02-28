@@ -1,7 +1,6 @@
-import { useState, useEffect, useRef } from 'preact/hooks'
 import type { Message } from '../../types/index.ts'
 import { agentMap } from '../../state/agents.ts'
-import { messageMap, revealingIds, onRevealComplete } from '../../state/conversations.ts'
+import { messageMap } from '../../state/conversations.ts'
 import { Avatar } from '../shared/Avatar.tsx'
 import { formatTime } from '../../utils/format.ts'
 import { Markdown } from './Markdown.tsx'
@@ -14,41 +13,6 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const isSystem = message.role === 'system'
   const agent = message.agent_id ? agentMap.value.get(message.agent_id) : null
-
-  // Check once on mount whether this message should play reveal animation.
-  // Set.delete returns true if the element was present (consumes the flag).
-  const shouldReveal = useRef(
-    message.role === 'assistant' && revealingIds.has(message.id)
-  )
-  const len = message.content.length
-  const totalMs = shouldReveal.current
-    ? Math.min(Math.max(len * 12, 400), 2000)
-    : 0
-  const [revealed, setRevealed] = useState(shouldReveal.current ? 0 : len)
-  const done = revealed >= len
-
-  useEffect(() => {
-    if (!shouldReveal.current) return
-    const start = performance.now()
-    let raf: number
-
-    const tick = (now: number) => {
-      const p = Math.min((now - start) / totalMs, 1)
-      setRevealed(Math.ceil(p * len))
-      if (p < 1) {
-        raf = requestAnimationFrame(tick)
-      } else {
-        onRevealComplete(message.id)
-      }
-    }
-
-    raf = requestAnimationFrame(tick)
-    return () => {
-      cancelAnimationFrame(raf)
-      // If unmounted before finishing, still signal completion
-      if (!done) onRevealComplete(message.id)
-    }
-  }, [])
 
   if (isSystem) {
     return (
@@ -108,14 +72,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               class="max-w-xs rounded mb-2"
             />
           ))}
-          {done ? (
-            <Markdown content={message.content} />
-          ) : (
-            <span class="whitespace-pre-wrap">
-              {message.content.slice(0, revealed)}
-              <span class="inline-block w-0.5 h-3.5 bg-accent animate-pulse ml-px align-text-bottom" />
-            </span>
-          )}
+          <Markdown content={message.content} />
         </div>
       </div>
     </div>

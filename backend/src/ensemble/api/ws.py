@@ -511,7 +511,7 @@ class VoiceSession:
                     await _send(self._ws, {
                         "type": "message_complete",
                         "message": {
-                            "id": msg_ids.get(agent_id, _uuid.uuid4().hex[:12]),
+                            "id": msg.id,
                             "role": "assistant",
                             "agent_id": agent_id,
                             "content": msg.content,
@@ -617,6 +617,7 @@ async def handle_conversation_ws(
 
             if msg_type == "message":
                 content = msg.get("content", "")
+                client_msg_id = msg.get("id")
                 raw_attachments = msg.get("attachments", [])
                 attachments = (
                     [Attachment(**a) for a in raw_attachments] if raw_attachments else []
@@ -625,6 +626,16 @@ async def handle_conversation_ws(
                 if not content and not attachments:
                     await _send(ws, {"type": "error", "message": "Empty message"})
                     continue
+
+                # Build user message, using the client-provided ID so that
+                # reply_to_id references match the frontend's optimistic message.
+                user_msg_kwargs: dict[str, Any] = {
+                    "role": MessageRole.USER,
+                    "content": content,
+                    "attachments": attachments,
+                }
+                if client_msg_id:
+                    user_msg_kwargs["id"] = client_msg_id
 
                 if conv.type == ConversationType.GROUP:
                     # Cancel any active group round
@@ -636,12 +647,7 @@ async def handle_conversation_ws(
                             pass
                         await _send(ws, {"type": "interrupt"})
 
-                    # Record user message
-                    user_msg = Message(
-                        role=MessageRole.USER,
-                        content=content,
-                        attachments=attachments,
-                    )
+                    user_msg = Message(**user_msg_kwargs)
                     conv.messages.append(user_msg)
 
                     # Run new round in background so WS loop stays responsive
@@ -652,11 +658,7 @@ async def handle_conversation_ws(
                     )
                 else:
                     # Direct chats: inline await (no interruption needed)
-                    user_msg = Message(
-                        role=MessageRole.USER,
-                        content=content,
-                        attachments=attachments,
-                    )
+                    user_msg = Message(**user_msg_kwargs)
                     conv.messages.append(user_msg)
                     await _handle_direct_streaming(
                         ws, conv, content, attachments, registry, mistral_client
@@ -791,10 +793,12 @@ async def _handle_group_streaming(
 
             elif event_type == "message":
                 msg = data  # This is a Message object
+                # Use the Message's own ID so reply_to_id references
+                # from subsequent agents resolve correctly on the frontend.
                 await _send(ws, {
                     "type": "message_complete",
                     "message": {
-                        "id": msg_ids.get(msg.agent_id, _uuid.uuid4().hex[:12]),
+                        "id": msg.id,
                         "role": "assistant",
                         "agent_id": msg.agent_id,
                         "content": msg.content,

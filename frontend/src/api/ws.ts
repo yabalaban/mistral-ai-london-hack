@@ -4,8 +4,6 @@ import {
   appendMessage,
   commitMessage,
   updateConversationTopic,
-  revealingIds,
-  revealCallbacks,
 } from '../state/conversations.ts'
 import { activeCall, currentSpeaker, agentSpeaking, partialTranscript } from '../state/call.ts'
 import { generateId } from '../utils/format.ts'
@@ -92,7 +90,7 @@ class WebSocketManager {
     switch (event.type) {
       case 'message_chunk': {
         const prev = streamingAgents.value.get(event.agent_id)
-        if (!prev) break // turn_change queued behind reveal — ignore silently
+        if (!prev) break
         const updated = new Map(streamingAgents.value)
         updated.set(event.agent_id, {
           agentId: event.agent_id,
@@ -153,24 +151,14 @@ class WebSocketManager {
         })
         break
       case 'turn_change': {
-        // Show typing indicator — but wait for any active reveal animation first
-        // so the previous bubble finishes typing out before the next one starts
-        const applyTurn = () => {
-          currentSpeaker.value = event.agent_id
-          const turnMap = new Map(streamingAgents.value)
-          turnMap.set(event.agent_id, {
-            agentId: event.agent_id,
-            content: '',
-            replyToId: event.reply_to_id,
-          })
-          streamingAgents.value = turnMap
-        }
-        if (revealingIds.size > 0) {
-          const waitFor = [...revealingIds][0]
-          revealCallbacks.set(waitFor, applyTurn)
-        } else {
-          applyTurn()
-        }
+        currentSpeaker.value = event.agent_id
+        const turnMap = new Map(streamingAgents.value)
+        turnMap.set(event.agent_id, {
+          agentId: event.agent_id,
+          content: '',
+          replyToId: event.reply_to_id,
+        })
+        streamingAgents.value = turnMap
         break
       }
       case 'call_started':

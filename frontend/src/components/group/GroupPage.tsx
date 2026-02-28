@@ -35,8 +35,9 @@ export function GroupPage({ id }: GroupPageProps) {
   const mode = callMode.value
 
   const handleSend = (content: string, attachments?: Attachment[]) => {
+    const msgId = generateId()
     appendMessage({
-      id: generateId(),
+      id: msgId,
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
@@ -45,6 +46,7 @@ export function GroupPage({ id }: GroupPageProps) {
     if (!USE_MOCKS) {
       wsManager.send({
         type: 'message',
+        id: msgId,
         content,
         attachments: attachments?.map((a) => ({ type: 'image', url: a.url })) ?? [],
       })
