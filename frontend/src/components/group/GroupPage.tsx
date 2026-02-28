@@ -15,6 +15,8 @@ import { ChatInput } from '../chat/ChatInput.tsx'
 import { AgentPicker } from './AgentPicker.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
 import { Button } from '../shared/Button.tsx'
+import { LogsPanel } from '../shared/LogsPanel.tsx'
+import type { LogEntry } from '../shared/LogsPanel.tsx'
 import { generateId } from '../../utils/format.ts'
 import { route } from 'preact-router'
 import type { Attachment } from '../../types/index.ts'
@@ -31,6 +33,8 @@ export function GroupPage({ id }: GroupPageProps) {
   useConversation(id)
   const { toggleMic } = useVoice()
   const [showPicker, setShowPicker] = useState(false)
+  const [logsOpen, setLogsOpen] = useState(false)
+  const [logEntries] = useState<LogEntry[]>([])
 
   const conv = activeConversation.value
   const call = activeCall.value
@@ -110,13 +114,13 @@ export function GroupPage({ id }: GroupPageProps) {
 
   return (
     <>
-      <Header title="Group Call">
+      <Header title="Group Call" onToggleLogs={() => setLogsOpen((o) => !o)}>
         {!call && (
           <Button onClick={handleStartCall}>Start Call</Button>
         )}
         <button
           onClick={() => setShowPicker(true)}
-          class="p-2 text-dc-text-muted hover:text-dc-text transition-colors"
+          class="p-2 text-white/40 hover:text-white transition-colors"
           title="Add agents"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -156,6 +160,8 @@ export function GroupPage({ id }: GroupPageProps) {
           onClose={() => setShowPicker(false)}
         />
       )}
+
+      <LogsPanel open={logsOpen} onClose={() => setLogsOpen(false)} entries={logEntries} />
     </>
   )
 }

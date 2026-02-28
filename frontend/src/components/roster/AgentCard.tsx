@@ -14,7 +14,6 @@ interface AgentCardProps {
 export function AgentCard({ agent, onViewProfile }: AgentCardProps) {
   const startChat = async () => {
     if (USE_MOCKS) {
-      // Create a mock conversation
       const mockConv = {
         id: `conv-${agent.id}`,
         type: 'direct' as const,
@@ -39,20 +38,20 @@ export function AgentCard({ agent, onViewProfile }: AgentCardProps) {
   }
 
   return (
-    <div class="bg-dc-secondary rounded-lg p-4 hover:bg-dc-tertiary transition-colors group">
+    <div class="glass rounded-2xl p-4 hover:-translate-y-1 hover:glow-soft transition-all duration-200 group">
       <div class="flex items-start gap-3">
         <Avatar name={agent.name} src={agent.avatar} size="lg" />
         <div class="min-w-0 flex-1">
-          <h3 class="font-semibold text-dc-text">{agent.name}</h3>
-          <p class="text-sm text-dc-blurple">{agent.role}</p>
+          <h3 class="font-semibold text-white">{agent.name}</h3>
+          <p class="text-sm text-accent">{agent.role}</p>
         </div>
       </div>
-      <p class="mt-3 text-sm text-dc-text-secondary line-clamp-2">{agent.bio}</p>
+      <p class="mt-3 text-sm text-white/70 line-clamp-2">{agent.bio}</p>
       <div class="mt-2 flex flex-wrap gap-1">
         {agent.tools?.map((tool) => (
           <span
             key={tool}
-            class="text-xs px-2 py-0.5 rounded-full bg-dc-primary text-dc-text-muted"
+            class="text-xs px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-white/40"
           >
             {tool}
           </span>
@@ -61,13 +60,13 @@ export function AgentCard({ agent, onViewProfile }: AgentCardProps) {
       <div class="mt-4 flex gap-2">
         <button
           onClick={startChat}
-          class="flex-1 px-3 py-1.5 bg-dc-blurple hover:bg-dc-blurple-hover text-white text-sm rounded transition-colors"
+          class="flex-1 px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-sm rounded-xl transition-colors"
         >
           Message
         </button>
         <button
           onClick={() => onViewProfile(agent)}
-          class="px-3 py-1.5 bg-dc-primary hover:bg-dc-tertiary text-dc-text-secondary text-sm rounded transition-colors"
+          class="px-3 py-1.5 glass hover:bg-white/10 text-white/70 text-sm rounded-xl transition-colors"
         >
           Profile
         </button>

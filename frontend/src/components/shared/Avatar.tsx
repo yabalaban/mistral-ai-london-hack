@@ -8,17 +8,17 @@ interface AvatarProps {
 const sizes = {
   sm: 'w-8 h-8 text-xs',
   md: 'w-10 h-10 text-sm',
-  lg: 'w-12 h-12 text-base',
+  lg: 'w-14 h-14 text-base',
   xl: 'w-20 h-20 text-2xl',
 }
 
 const colors = [
-  'bg-dc-blurple',
-  'bg-dc-green',
-  'bg-amber-600',
-  'bg-rose-600',
-  'bg-purple-600',
-  'bg-teal-600',
+  'bg-accent/80',
+  'bg-success/80',
+  'bg-amber-500/80',
+  'bg-rose-500/80',
+  'bg-purple-500/80',
+  'bg-teal-500/80',
 ]
 
 function getColor(name: string) {
@@ -29,7 +29,7 @@ function getColor(name: string) {
 
 export function Avatar({ src, name, size = 'md', speaking = false }: AvatarProps) {
   const sizeClass = sizes[size]
-  const ringClass = speaking ? 'ring-2 ring-dc-green animate-pulse' : ''
+  const ringClass = speaking ? 'ring-2 ring-accent speaking-ring' : ''
 
   return (
     <div

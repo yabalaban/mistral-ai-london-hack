@@ -42,13 +42,13 @@ export function ChatInput({
   return (
     <div class="px-4 pb-4">
       {attachments.length > 0 && (
-        <div class="flex gap-2 mb-2 p-2 bg-dc-secondary rounded-lg">
+        <div class="flex gap-2 mb-2 p-2 glass rounded-xl">
           {attachments.map((att, i) => (
             <div key={i} class="relative group">
               <img src={att.url} alt={att.name} class="h-16 rounded" />
               <button
                 onClick={() => removeAttachment(i)}
-                class="absolute -top-1 -right-1 bg-dc-red text-white rounded-full w-4 h-4 text-xs leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                class="absolute -top-1 -right-1 bg-danger text-white rounded-full w-4 h-4 text-xs leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
               >
                 &times;
               </button>
@@ -56,7 +56,7 @@ export function ChatInput({
           ))}
         </div>
       )}
-      <div class="flex items-end gap-2 bg-dc-input rounded-lg px-3 py-2">
+      <div class="flex items-end gap-2 glass rounded-2xl px-3 py-2">
         <ImageUpload onUpload={handleImageUpload} />
         <textarea
           value={text}
@@ -65,13 +65,13 @@ export function ChatInput({
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
-          class="flex-1 bg-transparent text-dc-text placeholder-dc-text-muted outline-none resize-none text-sm max-h-32"
+          class="flex-1 bg-transparent text-white placeholder-white/40 outline-none resize-none text-sm max-h-32"
           style={{ minHeight: '24px' }}
         />
         <button
           onClick={handleSubmit}
           disabled={disabled || (!text.trim() && attachments.length === 0)}
-          class="p-1.5 text-dc-blurple hover:text-dc-text disabled:text-dc-text-muted transition-colors"
+          class="p-1.5 text-accent hover:text-white disabled:text-white/40 transition-colors"
         >
           <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />

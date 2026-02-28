@@ -31,7 +31,7 @@ export function ImageUpload({ onUpload }: ImageUploadProps) {
       />
       <button
         onClick={() => inputRef.current?.click()}
-        class="p-2 text-dc-text-muted hover:text-dc-text transition-colors"
+        class="p-2 text-white/40 hover:text-white transition-colors"
         title="Upload image"
       >
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -19,7 +19,7 @@ export function MessageList({ messages }: MessageListProps) {
   return (
     <div class="flex-1 overflow-y-auto py-4">
       {messages.length === 0 && !streaming && (
-        <div class="flex items-center justify-center h-full text-dc-text-muted">
+        <div class="flex items-center justify-center h-full text-white/40">
           Start a conversation...
         </div>
       )}

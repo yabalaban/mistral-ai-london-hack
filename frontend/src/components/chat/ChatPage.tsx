@@ -1,3 +1,4 @@
+import { useState } from 'preact/hooks'
 import { useConversation } from '../../hooks/useConversation.ts'
 import {
   activeConversation,
@@ -9,6 +10,8 @@ import { Header } from '../layout/Header.tsx'
 import { MessageList } from './MessageList.tsx'
 import { ChatInput } from './ChatInput.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
+import { LogsPanel } from '../shared/LogsPanel.tsx'
+import type { LogEntry } from '../shared/LogsPanel.tsx'
 import { generateId } from '../../utils/format.ts'
 import type { Attachment } from '../../types/index.ts'
 
@@ -22,11 +25,12 @@ export function ChatPage({ id }: ChatPageProps) {
   if (!id) return null
 
   useConversation(id)
+  const [logsOpen, setLogsOpen] = useState(false)
+  const [logEntries] = useState<LogEntry[]>([])
 
   const conv = activeConversation.value
 
   const handleSend = async (content: string, attachments?: Attachment[]) => {
-    // Optimistic add
     addOptimisticMessage({
       id: generateId(),
       role: 'user',
@@ -54,7 +58,7 @@ export function ChatPage({ id }: ChatPageProps) {
 
   return (
     <>
-      <Header title={title} />
+      <Header title={title} onToggleLogs={() => setLogsOpen((o) => !o)} />
       {!conv ? (
         <div class="flex-1 flex items-center justify-center">
           <Spinner />
@@ -65,6 +69,7 @@ export function ChatPage({ id }: ChatPageProps) {
           <ChatInput onSend={handleSend} placeholder={`Message ${agent?.name ?? 'agent'}...`} />
         </>
       )}
+      <LogsPanel open={logsOpen} onClose={() => setLogsOpen(false)} entries={logEntries} />
     </>
   )
 }

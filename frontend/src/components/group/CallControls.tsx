@@ -11,11 +11,11 @@ export function CallControls({ onToggleMic, onEndCall, onToggleMode }: CallContr
   const micOn = isMicOn.value
 
   return (
-    <div class="flex items-center justify-center gap-4 py-4 bg-dc-secondary border-t border-dc-primary">
+    <div class="flex items-center justify-center gap-4 py-4 glass-subtle border-t border-white/5">
       {/* Mode toggle */}
       <button
         onClick={onToggleMode}
-        class="flex items-center gap-2 px-4 py-2 rounded-full bg-dc-tertiary hover:bg-dc-input text-dc-text-secondary hover:text-dc-text transition-colors text-sm"
+        class="flex items-center gap-2 px-4 py-2 rounded-full glass hover:bg-white/10 text-white/70 hover:text-white transition-colors text-sm"
       >
         {mode === 'voice' ? (
           <>
@@ -38,10 +38,10 @@ export function CallControls({ onToggleMic, onEndCall, onToggleMode }: CallContr
       {mode === 'voice' && (
         <button
           onClick={onToggleMic}
-          class={`p-3 rounded-full transition-colors ${
+          class={`p-3 rounded-full transition-all ${
             micOn
-              ? 'bg-dc-green text-white'
-              : 'bg-dc-tertiary text-dc-text-muted hover:text-dc-text'
+              ? 'bg-accent text-white glow-accent'
+              : 'glass text-white/40 hover:text-white'
           }`}
         >
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -60,7 +60,7 @@ export function CallControls({ onToggleMic, onEndCall, onToggleMode }: CallContr
       {/* End call */}
       <button
         onClick={onEndCall}
-        class="px-6 py-2 bg-dc-red hover:bg-red-600 text-white rounded-full font-medium text-sm transition-colors"
+        class="px-6 py-2 bg-danger hover:bg-red-600 text-white rounded-full font-medium text-sm transition-colors"
       >
         End Call
       </button>

@@ -22,16 +22,16 @@ export function MessageBubble({ message, isStreaming = false }: MessageBubblePro
       )}
       <div class={`max-w-[70%] ${isUser ? 'items-end' : 'items-start'}`}>
         <div class={`flex items-baseline gap-2 mb-0.5 ${isUser ? 'justify-end' : ''}`}>
-          <span class="text-sm font-medium text-dc-text">
+          <span class="text-sm font-medium text-white">
             {isUser ? 'You' : agent?.name ?? 'Agent'}
           </span>
-          <span class="text-xs text-dc-text-muted">{formatTime(message.timestamp)}</span>
+          <span class="text-xs text-white/40">{formatTime(message.timestamp)}</span>
         </div>
         <div
-          class={`rounded-lg px-3 py-2 text-sm ${
+          class={`rounded-2xl px-3 py-2 text-sm ${
             isUser
-              ? 'bg-dc-blurple text-white'
-              : 'bg-dc-secondary text-dc-text'
+              ? 'bg-accent/20 border border-accent/20 backdrop-blur-sm text-white'
+              : 'glass text-white/90'
           }`}
         >
           {message.attachments?.map((att, i) => (

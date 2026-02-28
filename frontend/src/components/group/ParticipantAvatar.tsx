@@ -20,14 +20,14 @@ export function ParticipantAvatar({ agent, isSpeaking, isUser = false }: Partici
         {isSpeaking && (
           <div class="absolute -bottom-1 left-1/2 -translate-x-1/2">
             <div class="flex gap-0.5">
-              <div class="w-1 h-3 bg-dc-green rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-              <div class="w-1 h-4 bg-dc-green rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-              <div class="w-1 h-3 bg-dc-green rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              <div class="w-1 h-3 bg-accent rounded-full dot-pulse-1" />
+              <div class="w-1 h-4 bg-accent rounded-full dot-pulse-2" />
+              <div class="w-1 h-3 bg-accent rounded-full dot-pulse-3" />
             </div>
           </div>
         )}
       </div>
-      <span class={`text-xs font-medium ${isSpeaking ? 'text-dc-green' : 'text-dc-text-secondary'}`}>
+      <span class={`text-xs font-medium ${isSpeaking ? 'text-accent' : 'text-white/70'}`}>
         {isUser ? 'You' : agent.name}
       </span>
     </div>
