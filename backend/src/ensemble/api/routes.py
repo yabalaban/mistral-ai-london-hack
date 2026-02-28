@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, UploadFile
+import base64
+
+from fastapi import APIRouter, File as FastAPIFile, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -150,6 +152,57 @@ async def send_message(conversation_id: str, req: SendMessageRequest):
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
+        return [
+            {
+                "id": r.id,
+                "role": r.role,
+                "agent_id": r.agent_id,
+                "content": r.content,
+                "timestamp": r.timestamp.isoformat(),
+            }
+            for r in replies
+        ]
+
+
+# ── Messages with image upload ─────────────────────────────────────────
+
+
+@router.post("/conversations/{conversation_id}/messages/upload")
+async def send_message_with_image(
+    conversation_id: str,
+    content: str = "",
+    image: UploadFile | None = None,
+):
+    """Send a message with an optional image attachment (multipart form).
+
+    The image is base64-encoded and sent to Mistral as a data URL.
+    """
+    conv = _conversation_mgr.get(conversation_id)
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+
+    attachments: list[Attachment] = []
+    if image:
+        img_bytes = await image.read()
+        mime = image.content_type or "image/png"
+        b64 = base64.b64encode(img_bytes).decode()
+        attachments.append(Attachment(type="image", url=f"data:{mime};base64,{b64}"))
+
+    if conv.type == ConversationType.DIRECT:
+        reply = await _conversation_mgr.send_direct_message(
+            conversation_id, content, attachments or None
+        )
+        return {
+            "id": reply.id,
+            "role": reply.role,
+            "agent_id": reply.agent_id,
+            "content": reply.content,
+            "timestamp": reply.timestamp.isoformat(),
+        }
+    else:
+        replies = await _oracle.run_group_turn(
+            conv, content, attachments or None, max_rounds=len(conv.participant_agent_ids)
+        )
         return [
             {
                 "id": r.id,

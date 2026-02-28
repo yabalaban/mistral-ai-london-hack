@@ -4,12 +4,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from mistralai import Mistral
 
 from ensemble.agents.registry import AgentRegistry
 from ensemble.api import routes
+from ensemble.api.ws import handle_conversation_ws
 from ensemble.config import settings
 from ensemble.conversations.manager import ConversationManager
 from ensemble.oracle.engine import OracleEngine
@@ -40,6 +41,12 @@ async def lifespan(app: FastAPI):
     # Wire up routes
     routes.init(registry, conversation_mgr, oracle, mistral_client=client)
 
+    # Store refs for WebSocket handler
+    app.state.registry = registry
+    app.state.conversation_mgr = conversation_mgr
+    app.state.oracle = oracle
+    app.state.mistral_client = client
+
     yield
 
     # Cleanup
@@ -57,6 +64,18 @@ app.add_middleware(
 )
 
 app.include_router(routes.router)
+
+
+@app.websocket("/ws/conversations/{conversation_id}")
+async def conversation_websocket(ws: WebSocket, conversation_id: str):
+    await handle_conversation_ws(
+        ws=ws,
+        conversation_id=conversation_id,
+        conversations=app.state.conversation_mgr._conversations,
+        registry=app.state.registry,
+        oracle=app.state.oracle,
+        mistral_client=app.state.mistral_client,
+    )
 
 
 @app.get("/health")
