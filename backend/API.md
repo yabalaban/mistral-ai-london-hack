@@ -266,6 +266,41 @@ Uses ElevenLabs TTS. If `voice_id` is empty, uses the default voice.
 
 ---
 
+### Slides (Presentations)
+
+#### List Presentations
+
+```
+GET /api/slides
+```
+
+**Response:**
+```json
+{
+  "presentations": ["6b9b29a7581f", "a3c4d5e6f7g8"]
+}
+```
+
+#### View Presentation
+
+```
+GET /api/slides/{presentation_id}
+```
+
+**Response:** Full Reveal.js HTML page. Open in a browser to view slides.
+
+Slides are generated when the PA agent uses the `create_slides` function tool.
+The agent returns a link like `/api/slides/6b9b29a7581f` in its response.
+
+**How it works:**
+1. User asks PA to "create slides about X from my notes"
+2. PA agent calls `create_slides` tool with structured slide data
+3. Backend renders Reveal.js HTML and stores it in memory
+4. Agent responds with a link to view the presentation
+5. Open the link in a browser → full interactive slide deck
+
+---
+
 ## WebSocket
 
 ### Conversation WebSocket
