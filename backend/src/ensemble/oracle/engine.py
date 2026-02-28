@@ -61,11 +61,12 @@ Set done=true when key perspectives are covered or when no one would naturally a
 """
 
 AGENT_CONTEXT_TEMPLATE = """\
-[Thread — you're {name}] [Topic: {topic}]
+[Thread — you're {name}]
+[User said]: {user_message}
+[Topic]: {topic}
+[Focus]: {hint}
 
 {context}
-
-[→ {name}]: {hint}
 
 Reply like a human in a group chat. 1-2 sentences. No walls of text. \
 No bullet points unless asked. Don't repeat others. \
@@ -211,10 +212,19 @@ class OracleEngine:
         context_lines = self._format_history(recent)
         agent = self._registry.get(agent_id)
         name = agent.name if agent else agent_id
-        topic = conversation.topic or "General discussion"
+
+        # Find the latest user message that triggered this round
+        user_message = ""
+        for msg in reversed(conversation.messages):
+            if msg.role == MessageRole.USER:
+                user_message = msg.content
+                break
+
+        topic = conversation.topic if conversation.topic and conversation.topic != "General discussion" else "none"
 
         return AGENT_CONTEXT_TEMPLATE.format(
             name=name,
+            user_message=user_message,
             topic=topic,
             context="\n".join(context_lines) if context_lines else "(empty)",
             hint=hint,
