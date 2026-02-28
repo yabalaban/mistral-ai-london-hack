@@ -40,6 +40,9 @@ export function MessageBubble({ message, isStreaming = false }: MessageBubblePro
           <span class="text-sm font-medium text-white">
             {isUser ? 'You' : agent?.name ?? 'Agent'}
           </span>
+          {!isUser && agent?.role && (
+            <span class="text-xs text-white/30">{agent.role}</span>
+          )}
           <span class="text-xs text-white/40">{formatTime(message.timestamp)}</span>
         </div>
         <div

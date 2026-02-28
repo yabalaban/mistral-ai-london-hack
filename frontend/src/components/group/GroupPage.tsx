@@ -29,7 +29,7 @@ interface GroupPageProps {
 
 export function GroupPage({ id }: GroupPageProps) {
   useConversation(id ?? '')
-  const { toggleMic } = useVoice()
+  const { startPTT, stopPTT, teardownMic } = useVoice()
   const [showPicker, setShowPicker] = useState(false)
 
   if (!id) return null
@@ -53,10 +53,7 @@ export function GroupPage({ id }: GroupPageProps) {
     try {
       const call = await startCall(id)
       activeCall.value = call
-      // Default to voice mode and auto-start mic
       callMode.value = 'voice'
-      // Small delay to ensure state is set before toggling mic
-      toggleMic()
     } catch (err) {
       console.error('Failed to start call', err)
     }
@@ -67,10 +64,7 @@ export function GroupPage({ id }: GroupPageProps) {
       activeCall.value = null
       return
     }
-    // Stop mic if active before ending call
-    if (isMicOn.value) {
-      toggleMic()
-    }
+    teardownMic()
     try {
       await endCall(id)
     } catch (err) {
@@ -159,15 +153,15 @@ export function GroupPage({ id }: GroupPageProps) {
         </button>
       </Header>
 
-      <div class="flex-1 flex overflow-hidden">
-        <div class="flex-1 flex flex-col">
+      <div class="flex-1 flex overflow-hidden min-h-0">
+        <div class="flex-1 flex flex-col min-h-0">
           {call && (
             <div class="flex-none border-b border-white/10">
               <ParticipantRing participantIds={participants} />
             </div>
           )}
-          <div class="flex-1 overflow-hidden relative">
-            <MessageList messages={conv.messages} />
+          <div class="flex-1 overflow-hidden relative min-h-0">
+            <MessageList messages={conv.messages.filter(m => m.role !== 'system')} />
             {/* Partial transcript overlay — shows what user is currently saying */}
             {call && mode === 'voice' && partialTranscript.value && (
               <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-white/60 text-sm italic animate-pulse">
@@ -180,13 +174,14 @@ export function GroupPage({ id }: GroupPageProps) {
           )}
           {call && (
             <CallControls
-              onToggleMic={toggleMic}
+              onStartPTT={startPTT}
+              onStopPTT={stopPTT}
               onEndCall={handleEndCall}
               onToggleMode={handleToggleMode}
             />
           )}
         </div>
-        {!call && <GroupMessages messages={conv.messages} />}
+        {!call && <GroupMessages messages={conv.messages.filter(m => m.role === 'system')} />}
       </div>
 
       {showPicker && (
