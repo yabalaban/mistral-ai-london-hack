@@ -20,10 +20,11 @@ Protocol:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
+import uuid as _uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -110,7 +111,7 @@ async def handle_conversation_ws(
             elif msg_type == "start_call":
                 mode = msg.get("mode", "text")
                 call_data = {
-                    "id": __import__("uuid").uuid4().hex[:12],
+                    "id": _uuid.uuid4().hex[:12],
                     "conversation_id": conversation_id,
                     "participants": conv.participant_agent_ids,
                     "oracle_agent_id": "oracle",
@@ -202,9 +203,6 @@ async def _handle_group_streaming(
     mistral_client: Any,
 ) -> None:
     """Handle group conversation using Mistral native handoffs with streaming."""
-    import uuid as _uuid
-    from datetime import datetime, timezone
-
     try:
         msg_ids: dict[str, str] = {}  # agent_id -> current message_id
 
@@ -325,8 +323,6 @@ async def _stream_agent_response(
       - FunctionCallEvent: agent wants to call a tool
       - ResponseDoneEvent: contains usage stats
     """
-    import uuid as _uuid
-
     full_text = ""
     has_function_call = False
     msg_id = _uuid.uuid4().hex[:12]
@@ -379,7 +375,7 @@ async def _stream_agent_response(
             response = await _handle_function_calls(
                 mistral_client, response, conv, agent_id
             )
-            tool_reply = _extract_chunk_text_from_response(response)
+            tool_reply = extract_reply(response)
             if tool_reply:
                 full_text = tool_reply
                 await _send(ws, {
@@ -397,21 +393,11 @@ async def _stream_agent_response(
             "role": "assistant",
             "agent_id": agent_id,
             "content": full_text,
-            "timestamp": __import__("datetime").datetime.now(
-                __import__("datetime").timezone.utc
-            ).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         },
     })
 
     return full_text
-
-
-def _extract_chunk_text_from_response(response) -> str:
-    """Extract text from a non-streaming conversation response.
-
-    Delegates to the shared ``extract_reply`` helper.
-    """
-    return extract_reply(response)
 
 
 def _extract_chunk_text(output) -> str:

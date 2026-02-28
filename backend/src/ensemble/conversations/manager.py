@@ -195,9 +195,3 @@ async def _handle_function_calls(client, response, conv, agent_id, max_rounds: i
         conv.mistral_conversation_ids[agent_id] = response.conversation_id
 
     return response
-
-
-
-# Re-export for backward compatibility and for ws.py import
-_build_inputs = build_inputs
-_extract_reply = extract_reply

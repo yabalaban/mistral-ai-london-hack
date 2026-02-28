@@ -24,6 +24,7 @@ from ensemble.conversations.models import (
     Message,
     MessageRole,
 )
+from ensemble.utils import build_inputs, extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +124,7 @@ class OracleEngine:
             oracle_id = await self.setup_group(conversation)
 
         # Build inputs
-        inputs = content
-        if attachments:
-            parts: list[dict] = [{"type": "text", "text": content}]
-            for att in attachments:
-                if att.type == "image":
-                    parts.append({"type": "image_url", "image_url": {"url": att.url}})
-            inputs = [{"role": "user", "content": parts}]
+        inputs = build_inputs(content, attachments)
 
         # Start or continue Mistral conversation
         mistral_conv_id = conversation.mistral_conversation_ids.get("__group__")
@@ -154,7 +149,7 @@ class OracleEngine:
             otype = type(output).__name__
 
             if otype == "MessageOutputEntry":
-                text = _extract_text(output)
+                text = extract_text_from_content(output.content)
                 if text:
                     # Map Mistral agent ID back to our agent ID
                     mistral_aid = getattr(output, "agent_id", None)
@@ -202,13 +197,7 @@ class OracleEngine:
             oracle_id = await self.setup_group(conversation)
 
         # Build inputs
-        inputs = content
-        if attachments:
-            parts: list[dict] = [{"type": "text", "text": content}]
-            for att in attachments:
-                if att.type == "image":
-                    parts.append({"type": "image_url", "image_url": {"url": att.url}})
-            inputs = [{"role": "user", "content": parts}]
+        inputs = build_inputs(content, attachments)
 
         # Stream
         mistral_conv_id = conversation.mistral_conversation_ids.get("__group__")
@@ -259,7 +248,7 @@ class OracleEngine:
                 })
 
             elif hasattr(data, "content"):
-                text = _extract_chunk(data)
+                text = extract_text_from_content(getattr(data, "content", ""))
                 if text:
                     current_text += text
                     yield ("chunk", {
@@ -296,37 +285,3 @@ class OracleEngine:
                 logger.exception("Failed to delete oracle for %s", conv_id)
 
 
-def _extract_text(output) -> str:
-    content = output.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = []
-        for c in content:
-            if isinstance(c, dict):
-                texts.append(c.get("text", ""))
-            elif hasattr(c, "text"):
-                texts.append(getattr(c, "text", "") or "")
-        return "".join(texts)
-    if hasattr(content, "text"):
-        return content.text or ""
-    return str(content)
-
-
-def _extract_chunk(data) -> str:
-    content = getattr(data, "content", None)
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = []
-        for c in content:
-            if isinstance(c, dict):
-                texts.append(c.get("text", ""))
-            elif hasattr(c, "text"):
-                texts.append(getattr(c, "text", "") or "")
-        return "".join(texts)
-    if hasattr(content, "text"):
-        return content.text or ""
-    return ""

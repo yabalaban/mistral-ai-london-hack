@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import base64
+import uuid as _uuid
 
-from fastapi import APIRouter, File as FastAPIFile, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -161,8 +162,6 @@ async def send_message(conversation_id: str, req: SendMessageRequest):
 
 
 # ── Calls ──────────────────────────────────────────────────────────────────
-
-import uuid as _uuid
 
 _active_calls: dict[str, dict] = {}
 
