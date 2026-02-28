@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PROFILES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "agents"
+PROFILES_DIR = Path(__file__).resolve().parent.parent.parent / "agents"
 
 
 @asynccontextmanager
