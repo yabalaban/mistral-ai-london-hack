@@ -8,6 +8,7 @@ from mistralai import Mistral
 from mistralai.models import (
     CodeInterpreterTool,
     WebSearchTool,
+    DocumentLibraryTool,
 )
 
 from ensemble.agents.models import AgentProfile

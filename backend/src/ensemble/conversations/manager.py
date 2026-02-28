@@ -127,9 +127,15 @@ def _extract_reply(response) -> str:
             content = output.content
             if isinstance(content, str):
                 return content
-            # Could be structured content
             if isinstance(content, list):
-                texts = [c.get("text", "") for c in content if isinstance(c, dict)]
+                texts = []
+                for c in content:
+                    if isinstance(c, dict):
+                        texts.append(c.get("text", ""))
+                    elif hasattr(c, "text"):
+                        texts.append(getattr(c, "text", "") or "")
                 return "".join(texts)
+            if hasattr(content, "text"):
+                return content.text or ""
             return str(content)
     return ""
