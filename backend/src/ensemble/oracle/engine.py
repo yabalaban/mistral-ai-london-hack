@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 from typing import Any, cast
 
 from mistralai import Mistral
@@ -27,6 +26,7 @@ from ensemble.conversations.models import (
     Message,
     MessageRole,
 )
+from ensemble.oracle.turn_logger import RoundRecord, TurnRecord, log_turn
 from ensemble.utils import extract_text_from_content
 
 logger = logging.getLogger(__name__)
@@ -35,9 +35,6 @@ MAX_CONTEXT_MESSAGES = 15
 MAX_ROUNDS = 3
 PASS_TOKEN = "[PASS]"
 PASS_VARIANTS = {"[pass]", "pass", "[pass].", "pass."}
-
-
-RESPONSE_PROBABILITY = 0.95
 
 
 def _is_pass(text: str) -> bool:
@@ -80,14 +77,39 @@ AGENT_CONTEXT_TEMPLATE = """\
 [Thread — you're {name}]
 [User said]: {user_message}
 [Topic]: {topic}
+{hint_line}
 
 {context}
 
-If you have something genuinely useful to add, reply naturally (1-2 sentences, \
-like a human in a group chat). No walls of text. No bullet points unless asked. \
+Reply naturally (1-2 sentences, like a human in a group chat). \
 Don't repeat what others already said.
+Don't start your reply by addressing someone by name — it's a thread, context is clear.
+Don't end with a question unless you genuinely need an answer.
 
 If you have nothing meaningful to contribute, reply with exactly: [PASS]
+"""
+
+RANKER_SYSTEM = """\
+You rank which agents should respond to a message in a group chat.
+
+Agents:
+{agent_descriptions}
+
+Rules:
+- Casual/social messages (greetings, thanks, banter) → everyone responds
+- Topic-specific messages → only agents with relevant expertise respond
+- At least one agent must respond
+- Order by relevance (most relevant first)
+- The hint is a short phrase (3-5 words) guiding the agent's angle, or null
+- last_speaker can appear again if they have more to add (self-reply)
+
+User message: {user_message}
+Topic: {topic}
+Last speaker: {last_speaker}
+Prior responses: {prior_summary}
+
+Return JSON:
+{{"ranking": [{{"agent_id": "...", "should_respond": true/false, "hint": "..." or null}}, ...]}}
 """
 
 TOPIC_GRADER_SYSTEM = """\
@@ -190,6 +212,75 @@ class OracleEngine:
             logger.exception("Topic grading failed")
             return None
 
+    async def rank_agents(
+        self,
+        content: str,
+        conversation: Conversation,
+        agent_ids: list[str],
+        last_speaker: str | None = None,
+    ) -> list[dict]:
+        """Rank agents by relevance to decide who should respond."""
+        # Build agent descriptions from registry
+        descriptions = []
+        for aid in agent_ids:
+            agent = self._registry.get(aid)
+            if agent:
+                descriptions.append(
+                    f"- {aid}: {agent.role} — {agent.personality.split('.')[0]}"
+                )
+
+        # Summarize prior responses in this turn
+        prior = []
+        for msg in conversation.messages[-MAX_CONTEXT_MESSAGES:]:
+            if msg.role == MessageRole.AGENT and msg.agent_id:
+                agent = self._registry.get(msg.agent_id)
+                name = agent.name if agent else msg.agent_id
+                prior.append(f"{name}: {msg.content[:100]}")
+        prior_summary = "\n".join(prior[-5:]) if prior else "none"
+
+        has_topic = (
+            conversation.topic
+            and conversation.topic != "General discussion"
+        )
+
+        try:
+            response = await self._client.chat.complete_async(
+                model=settings.oracle_model,
+                messages=cast(Any, [
+                    {"role": "system", "content": RANKER_SYSTEM.format(
+                        agent_descriptions="\n".join(descriptions),
+                        user_message=content,
+                        topic=conversation.topic if has_topic else "none",
+                        last_speaker=last_speaker or "none",
+                        prior_summary=prior_summary,
+                    )},
+                    {"role": "user", "content": content},
+                ]),
+                response_format={"type": "json_object"},
+            )
+            data = json.loads(response.choices[0].message.content.strip())
+            ranking = data.get("ranking", [])
+
+            # Validate: only keep known agent IDs
+            known = set(agent_ids)
+            ranking = [r for r in ranking if r.get("agent_id") in known]
+
+            # Ensure at least one agent responds
+            if not ranking or not any(r.get("should_respond") for r in ranking):
+                return [{"agent_id": aid, "should_respond": True, "hint": None}
+                        for aid in agent_ids]
+
+            logger.info(
+                "Ranker: %s → %s",
+                content[:60],
+                [(r["agent_id"], r.get("should_respond")) for r in ranking],
+            )
+            return ranking
+        except Exception:
+            logger.exception("Ranker failed, including all agents")
+            return [{"agent_id": aid, "should_respond": True, "hint": None}
+                    for aid in agent_ids]
+
     # ── Helpers ───────────────────────────────────────────────────────────
 
     def _detect_directed_message(
@@ -222,7 +313,10 @@ class OracleEngine:
         return lines
 
     def _build_agent_prompt(
-        self, conversation: Conversation, agent_id: str
+        self,
+        conversation: Conversation,
+        agent_id: str,
+        hint: str | None = None,
     ) -> str:
         recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
         context_lines = self._format_history(recent)
@@ -240,21 +334,23 @@ class OracleEngine:
             and conversation.topic != "General discussion"
         )
         topic = conversation.topic if has_topic else "none"
+        hint_line = f"[Focus]: {hint}" if hint else ""
 
         return AGENT_CONTEXT_TEMPLATE.format(
             name=name,
             user_message=user_message,
             topic=topic,
+            hint_line=hint_line,
             context=(
                 "\n".join(context_lines) if context_lines else "(empty)"
             ),
         )
 
-    # Keep old name as alias for ws.py voice path
+    # Public alias for ws.py voice path
     def build_agent_prompt(
-        self, conversation: Conversation, agent_id: str, hint: str
+        self, conversation: Conversation, agent_id: str, hint: str | None = None
     ) -> str:
-        return self._build_agent_prompt(conversation, agent_id)
+        return self._build_agent_prompt(conversation, agent_id, hint=hint)
 
     def _get_ready_agents(self, conversation: Conversation) -> list[str]:
         """Return agent IDs that have a Mistral agent ready."""
@@ -301,6 +397,13 @@ class OracleEngine:
                 user_message_id = msg.id
                 break
 
+        # Turn record for logging
+        turn_record = TurnRecord(
+            conversation_id=conversation.id,
+            user_message=content,
+            topic=conversation.topic,
+        )
+
         # --- DIRECTED MESSAGE shortcut ---
         directed_agent = self._detect_directed_message(
             content, conversation.participant_agent_ids
@@ -308,6 +411,17 @@ class OracleEngine:
         if directed_agent:
             agent = self._registry.get(directed_agent)
             if agent and agent.mistral_agent_id:
+                turn_record.directed = True
+                turn_record.directed_agent = directed_agent
+                turn_record.rounds.append(RoundRecord(
+                    round=1,
+                    mode="directed",
+                    ranking=[{
+                        "agent_id": directed_agent,
+                        "should_respond": True,
+                        "hint": "directed",
+                    }],
+                ))
                 yield ("oracle_start", {
                     "directed": True,
                     "directed_agent": directed_agent,
@@ -317,6 +431,7 @@ class OracleEngine:
                     "speakers": [{
                         "agent_id": directed_agent,
                         "agent_name": agent.name,
+                        "should_respond": True,
                         "hint": "directed",
                     }],
                     "round": 1,
@@ -332,6 +447,7 @@ class OracleEngine:
                 ):
                     yield event
                 yield ("oracle_end", {})
+                log_turn(turn_record)
             return
 
         # --- CLASSIFY ---
@@ -356,14 +472,37 @@ class OracleEngine:
                 else user_message_id
             )
 
-            # Notify frontend
+            # Rank agents by relevance
+            ranking = await self.rank_agents(
+                content, conversation, agent_ids,
+                last_speaker=(
+                    speakers_so_far[-1] if speakers_so_far else None
+                ),
+            )
+            ranked_ids = [
+                r["agent_id"] for r in ranking if r.get("should_respond")
+            ]
+            if not ranked_ids:
+                ranked_ids = [ranking[0]["agent_id"]]
+            hint_map = {
+                r["agent_id"]: r.get("hint") for r in ranking
+            }
+
+            round_record = RoundRecord(
+                round=round_num + 1,
+                mode=mode,
+                ranking=ranking,
+            )
+
+            # Notify frontend with ranking info
             enriched = []
-            for aid in agent_ids:
-                agent = self._registry.get(aid)
+            for r in ranking:
+                agent = self._registry.get(r["agent_id"])
                 enriched.append({
-                    "agent_id": aid,
-                    "agent_name": agent.name if agent else aid,
-                    "hint": mode,
+                    "agent_id": r["agent_id"],
+                    "agent_name": agent.name if agent else r["agent_id"],
+                    "should_respond": r.get("should_respond", True),
+                    "hint": r.get("hint"),
                 })
             yield ("oracle", {
                 "reasoning": f"Round {round_num + 1} ({mode})",
@@ -372,7 +511,17 @@ class OracleEngine:
                 "mode": mode,
             })
 
-            # Run the appropriate mode
+            # Emit filtered verdicts for agents ranked out
+            for r in ranking:
+                if not r.get("should_respond"):
+                    agent = self._registry.get(r["agent_id"])
+                    yield ("agent_verdict", {
+                        "agent_id": r["agent_id"],
+                        "agent_name": agent.name if agent else r["agent_id"],
+                        "verdict": "filtered",
+                    })
+
+            # Run the appropriate mode with ranked agents
             responded_ids: list[str] = []
             last_msg_id = reply_to_id
 
@@ -380,13 +529,25 @@ class OracleEngine:
                 self._run_parallel if mode == "parallel"
                 else self._run_sequential
             )
+            agent_content_map: dict[str, str] = {}
             async for ev_type, ev_data in runner(
-                conversation, agent_ids, voice_mode, reply_to_id
+                conversation, ranked_ids, voice_mode, reply_to_id,
+                hint_map=hint_map,
             ):
                 yield (ev_type, ev_data)
                 if ev_type == "message":
                     responded_ids.append(ev_data.agent_id)
                     last_msg_id = ev_data.id
+                    agent_content_map[ev_data.agent_id] = ev_data.content[:200]
+                if ev_type == "agent_verdict":
+                    entry = {
+                        "agent_id": ev_data["agent_id"],
+                        "verdict": ev_data["verdict"],
+                    }
+                    content = agent_content_map.get(ev_data["agent_id"])
+                    if content:
+                        entry["content"] = content
+                    round_record.agent_responses.append(entry)
 
             for aid in responded_ids:
                 if aid not in speakers_so_far:
@@ -395,6 +556,7 @@ class OracleEngine:
                 last_agent_message_id = last_msg_id
 
             if not responded_ids:
+                turn_record.rounds.append(round_record)
                 break
 
             # Grader (skip on last allowed round)
@@ -406,17 +568,24 @@ class OracleEngine:
                     "Grader round %d: done=%s reason=%s",
                     round_num + 1, done, reasoning,
                 )
+                round_record.grader = {
+                    "reasoning": reasoning,
+                    "done": done,
+                }
                 yield ("grader", {
                     "reasoning": reasoning,
                     "done": done,
                     "round": round_num + 1,
                 })
+                turn_record.rounds.append(round_record)
                 if done:
                     break
                 # After a parallel round, switch to sequential for
                 # follow-up so agents build on each other
                 if mode == "parallel":
                     mode = "sequential"
+            else:
+                turn_record.rounds.append(round_record)
 
         # Summary
         if len(speakers_so_far) >= 2:
@@ -424,9 +593,11 @@ class OracleEngine:
                 conversation, speakers_so_far
             )
             if summary:
+                turn_record.summary = summary
                 yield ("summary", {"content": summary})
 
         yield ("oracle_end", {})
+        log_turn(turn_record)
 
     # ── Parallel mode ────────────────────────────────────────────────────
 
@@ -436,14 +607,17 @@ class OracleEngine:
         agent_ids: list[str],
         voice_mode: bool,
         reply_to_id: str | None,
+        hint_map: dict[str, str | None] | None = None,
     ):
         """All agents respond concurrently. Yields events via queue."""
+        hint_map = hint_map or {}
         queue: asyncio.Queue[tuple[str, Any] | None] = asyncio.Queue()
 
         async def _run_agent(aid: str) -> None:
             try:
                 full_text, flushed = await self._stream_to_queue(
-                    queue, conversation, aid, voice_mode, reply_to_id
+                    queue, conversation, aid, voice_mode, reply_to_id,
+                    hint=hint_map.get(aid),
                 )
                 agent = self._registry.get(aid)
                 name = agent.name if agent else aid
@@ -470,27 +644,8 @@ class OracleEngine:
             except Exception:
                 logger.exception("Parallel agent %s failed", aid)
 
-        # Probabilistic filter
-        selected = [
-            aid for aid in agent_ids
-            if random.random() < RESPONSE_PROBABILITY
-        ]
-        if not selected:
-            selected = [random.choice(agent_ids)]
-
-        # Emit verdicts for probability-skipped agents
-        skipped = [aid for aid in agent_ids if aid not in selected]
-        for aid in skipped:
-            agent = self._registry.get(aid)
-            name = agent.name if agent else aid
-            await queue.put(("agent_verdict", {
-                "agent_id": aid,
-                "agent_name": name,
-                "verdict": "skipped",
-            }))
-
         tasks = [
-            asyncio.create_task(_run_agent(aid)) for aid in selected
+            asyncio.create_task(_run_agent(aid)) for aid in agent_ids
         ]
 
         async def _sentinel() -> None:
@@ -515,36 +670,21 @@ class OracleEngine:
         agent_ids: list[str],
         voice_mode: bool,
         reply_to_id: str | None,
+        hint_map: dict[str, str | None] | None = None,
     ):
         """Agents respond one-by-one, each seeing prior responses."""
+        hint_map = hint_map or {}
         current_reply_to = reply_to_id
 
-        # Probabilistic filter
-        selected = [
-            aid for aid in agent_ids
-            if random.random() < RESPONSE_PROBABILITY
-        ]
-        if not selected:
-            selected = [random.choice(agent_ids)]
-
-        # Emit verdicts for probability-skipped agents
-        skipped = [aid for aid in agent_ids if aid not in selected]
-        for aid in skipped:
-            agent = self._registry.get(aid)
-            name = agent.name if agent else aid
-            yield ("agent_verdict", {
-                "agent_id": aid,
-                "agent_name": name,
-                "verdict": "skipped",
-            })
-
-        for aid in selected:
+        for aid in agent_ids:
             agent = self._registry.get(aid)
             if not agent or not agent.mistral_agent_id:
                 continue
 
             # Rebuild prompt so this agent sees previous agents' responses
-            prompt = self._build_agent_prompt(conversation, aid)
+            prompt = self._build_agent_prompt(
+                conversation, aid, hint=hint_map.get(aid)
+            )
             mistral_conv_id = conversation.mistral_conversation_ids.get(aid)
             full_text = ""
             buffered: list[str] = []
@@ -667,6 +807,7 @@ class OracleEngine:
         agent_id: str,
         voice_mode: bool,
         reply_to_id: str | None,
+        hint: str | None = None,
     ) -> tuple[str, bool]:
         """Stream one agent into a queue, buffering to detect [PASS].
 
@@ -676,7 +817,7 @@ class OracleEngine:
         if not agent or not agent.mistral_agent_id:
             return "", False
 
-        prompt = self._build_agent_prompt(conversation, agent_id)
+        prompt = self._build_agent_prompt(conversation, agent_id, hint=hint)
         mistral_conv_id = conversation.mistral_conversation_ids.get(agent_id)
         full_text = ""
         buffered: list[str] = []

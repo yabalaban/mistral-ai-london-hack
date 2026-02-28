@@ -10,6 +10,7 @@ function VerdictPill({ v }: { v: AgentVerdict }) {
     responded: 'bg-emerald-100 text-emerald-700',
     passed: 'bg-zinc-100 text-zinc-500',
     skipped: 'bg-amber-100 text-amber-600',
+    filtered: 'bg-red-50 text-red-400',
   }
   return (
     <span class={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium ${colors[v.verdict]}`}>
@@ -53,8 +54,11 @@ function RoundCard({ round, directed, directedAgent }: { round: OracleRound; dir
       {round.speakers.length > 0 && (
         <div class="flex flex-wrap gap-1">
           {round.speakers.map((s) => (
-            <span key={s.agent_id} class="text-[11px] text-zinc-500">
-              {s.agent_name}{s.hint && s.hint !== round.mode ? ` (${s.hint})` : ''}
+            <span
+              key={s.agent_id}
+              class={`text-[11px] ${s.should_respond ? 'text-zinc-600' : 'text-zinc-300 line-through'}`}
+            >
+              {s.agent_name}{s.should_respond && s.hint ? ` (${s.hint})` : ''}
             </span>
           ))}
         </div>

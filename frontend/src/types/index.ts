@@ -49,11 +49,11 @@ export type WSEvent =
   | { type: 'turn_change'; agent_id: string; reply_to_id?: string }
   | { type: 'oracle_start'; directed: boolean; directed_agent?: string }
   | { type: 'oracle_end' }
-  | { type: 'oracle_reasoning'; reasoning: string; speakers: Array<{ agent_id: string; agent_name: string; hint: string }>; round: number; mode: string }
+  | { type: 'oracle_reasoning'; reasoning: string; speakers: Array<{ agent_id: string; agent_name: string; should_respond: boolean; hint: string | null }>; round: number; mode: string }
   | { type: 'topic_set'; topic: string }
   | { type: 'summary'; content: string }
   | { type: 'grader'; reasoning: string; done: boolean; round: number }
-  | { type: 'agent_verdict'; agent_id: string; agent_name: string; verdict: 'responded' | 'passed' | 'skipped' }
+  | { type: 'agent_verdict'; agent_id: string; agent_name: string; verdict: 'responded' | 'passed' | 'skipped' | 'filtered' }
   | { type: 'call_started'; call: GroupCall }
   | { type: 'call_ended'; call_id: string }
   | { type: 'audio_chunk'; agent_id: string; data: string }

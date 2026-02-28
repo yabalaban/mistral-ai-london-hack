@@ -3,14 +3,14 @@ import { signal } from '@preact/signals'
 export interface AgentVerdict {
   agentId: string
   agentName: string
-  verdict: 'responded' | 'passed' | 'skipped'
+  verdict: 'responded' | 'passed' | 'skipped' | 'filtered'
 }
 
 export interface OracleRound {
   round: number
   mode: string
   reasoning: string
-  speakers: Array<{ agent_id: string; agent_name: string; hint: string }>
+  speakers: Array<{ agent_id: string; agent_name: string; should_respond: boolean; hint: string | null }>
   verdicts: AgentVerdict[]
   grader?: { reasoning: string; done: boolean }
 }
