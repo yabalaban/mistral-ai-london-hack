@@ -254,6 +254,12 @@ async def _handle_group_streaming(
                     },
                 })
 
+            elif event_type == "summary":
+                await _send(ws, {
+                    "type": "summary",
+                    "content": data.get("content", ""),
+                })
+
     except Exception:
         logger.exception("Group streaming failed")
         await _send(ws, {"type": "error", "message": "Group conversation failed"})

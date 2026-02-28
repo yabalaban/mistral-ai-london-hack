@@ -48,6 +48,7 @@ export type WSEvent =
   | { type: 'turn_change'; agent_id: string }
   | { type: 'oracle_reasoning'; reasoning: string; next_speaker: string; next_speaker_name: string; hint: string }
   | { type: 'topic_set'; topic: string }
+  | { type: 'summary'; content: string }
   | { type: 'call_started'; call: GroupCall }
   | { type: 'call_ended'; call_id: string }
   | { type: 'audio_chunk'; agent_id: string; data: string }

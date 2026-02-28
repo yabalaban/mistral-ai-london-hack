@@ -30,7 +30,7 @@ from ensemble.utils import build_inputs, extract_text_from_content
 logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_MESSAGES = 15
-MAX_SPEAKERS_PER_TURN = 5
+MAX_SPEAKERS_PER_TURN = 7
 
 ORACLE_SYSTEM = """\
 You are the Oracle — an invisible moderator orchestrating a group discussion between AI agents.
@@ -341,6 +341,44 @@ class OracleEngine:
 
             except Exception:
                 logger.exception("Agent %s streaming failed", next_id)
+
+        # Generate round summary if multiple agents spoke
+        if len(speakers_this_round) >= 2:
+            summary = await self._generate_summary(conversation, speakers_this_round)
+            if summary:
+                yield ("summary", {"content": summary})
+
+    async def _generate_summary(
+        self, conversation: Conversation, speakers: list[str]
+    ) -> str | None:
+        """Generate a concise summary of the round."""
+        history = self._format_history(conversation.messages[-MAX_CONTEXT_MESSAGES:])
+        names = [
+            self._registry.get(s).name if self._registry.get(s) else s
+            for s in speakers
+        ]
+        topic = conversation.topic or "the discussion"
+
+        try:
+            response = await self._client.chat.complete_async(
+                model=settings.oracle_model,
+                messages=[
+                    {"role": "system", "content": (
+                        "Summarize this group discussion round in 2-3 bullet points. "
+                        "Focus on key decisions, disagreements, and action items. "
+                        "Be concise and sharp. Use markdown."
+                    )},
+                    {"role": "user", "content": (
+                        f"Topic: {topic}\n"
+                        f"Speakers: {', '.join(names)}\n\n"
+                        + "\n".join(history)
+                    )},
+                ],
+            )
+            return response.choices[0].message.content.strip()
+        except Exception:
+            logger.exception("Summary generation failed")
+            return None
 
     async def cleanup(self) -> None:
         """No-op — oracle doesn't create persistent Mistral agents."""

@@ -112,6 +112,14 @@ class WebSocketManager {
         })
         break
       }
+      case 'summary':
+        appendMessage({
+          id: generateId(),
+          role: 'system',
+          content: `📋 **Round Summary**\n${event.content}`,
+          timestamp: new Date().toISOString(),
+        })
+        break
       case 'turn_change':
         currentSpeaker.value = event.agent_id
         break
