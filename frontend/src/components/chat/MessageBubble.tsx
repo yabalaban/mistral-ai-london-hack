@@ -33,7 +33,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           <Avatar name={agent?.name ?? '?'} src={agent?.avatar} size="md" />
         </div>
       )}
-      <div class={`max-w-[70%] ${isUser ? 'items-end' : 'items-start'}`}>
+      <div class={`max-w-[85%] md:max-w-[70%] ${isUser ? 'items-end' : 'items-start'}`}>
         {message.reply_to_id && (() => {
           const replyMsg = messageMap.value.get(message.reply_to_id!)
           if (!replyMsg) return null

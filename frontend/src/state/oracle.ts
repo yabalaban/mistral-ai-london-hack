@@ -3,7 +3,7 @@ import { signal } from '@preact/signals'
 export interface AgentVerdict {
   agentId: string
   agentName: string
-  verdict: 'responded' | 'passed' | 'skipped' | 'filtered'
+  verdict: 'responded' | 'passed' | 'skipped' | 'filtered' | 'interrupted'
 }
 
 export interface OracleRound {
@@ -19,6 +19,7 @@ export interface OracleState {
   active: boolean
   directed: boolean
   directedAgent: string | null
+  goal: string | null
   rounds: OracleRound[]
   summary: string | null
   topic: string | null
@@ -28,6 +29,7 @@ const INITIAL_STATE: OracleState = {
   active: false,
   directed: false,
   directedAgent: null,
+  goal: null,
   rounds: [],
   summary: null,
   topic: null,
@@ -35,12 +37,13 @@ const INITIAL_STATE: OracleState = {
 
 export const oracleState = signal<OracleState>({ ...INITIAL_STATE })
 
-export function startOracle(directed: boolean, directedAgent?: string) {
+export function startOracle(directed: boolean, directedAgent?: string, goal?: string) {
   oracleState.value = {
     ...INITIAL_STATE,
     active: true,
     directed,
     directedAgent: directedAgent ?? null,
+    goal: goal ?? null,
     topic: oracleState.value.topic,
   }
 }

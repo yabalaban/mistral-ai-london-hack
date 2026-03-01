@@ -86,7 +86,7 @@ frontend/
 ### Frontend
 - **Preact, not React** — imports from `preact`, `preact/hooks`, `@preact/signals`. Vite aliases `react` → `preact/compat`.
 - **Signals for state** — use `signal()` for primitives, `computed()` for derived. No Redux, no Context.
-- **Tailwind utility classes** — dark theme with glass morphism (`glass`, `glass-strong`), cyan accent (`#06b6d4`).
+- **Tailwind utility classes** — light theme with glass morphism (`glass`, `glass-strong`), cyan accent (`#06b6d4`).
 - **`.ts` extensions in imports** — always use explicit extensions (`./foo.ts`, `./Bar.tsx`).
 - Components use functional style with hooks. No class components.
 

@@ -45,6 +45,22 @@ export function appendMessage(message: Message) {
   })
 }
 
+/** Upsert a message: update existing by ID or append if new. */
+export function upsertMessage(message: Message) {
+  const id = activeConversationId.value
+  if (!id) return
+  const conv = conversations.value.find((c) => c.id === id)
+  if (!conv) return
+  const idx = conv.messages.findIndex((m) => m.id === message.id)
+  if (idx >= 0) {
+    const updated = [...conv.messages]
+    updated[idx] = { ...updated[idx], content: message.content }
+    upsertConversation({ ...conv, messages: updated })
+  } else {
+    upsertConversation({ ...conv, messages: [...conv.messages, message] })
+  }
+}
+
 /**
  * Commit a completed agent message: remove from streaming state and
  * append to conversation. Called on message_complete (text) and will
@@ -54,7 +70,7 @@ export function commitMessage(agentId: string, message: Message) {
   const next = new Map(streamingAgents.value)
   next.delete(agentId)
   streamingAgents.value = next
-  appendMessage(message)
+  upsertMessage(message)
 }
 
 /** Discard an agent's in-progress stream without committing. */

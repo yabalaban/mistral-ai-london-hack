@@ -39,7 +39,7 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 8000
     default_model: str = "mistral-medium-latest"
-    oracle_model: str = "mistral-small-latest"
+    oracle_model: str = "ministral-14b-2512"
 
 
 settings = Settings()

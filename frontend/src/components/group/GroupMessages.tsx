@@ -6,11 +6,12 @@ import { Avatar } from '../shared/Avatar.tsx'
 
 function VerdictPill({ v }: { v: AgentVerdict }) {
   const agent = agentMap.value.get(v.agentId)
-  const colors = {
+  const colors: Record<string, string> = {
     responded: 'bg-emerald-100 text-emerald-700',
     passed: 'bg-zinc-100 text-zinc-500',
     skipped: 'bg-amber-100 text-amber-600',
     filtered: 'bg-red-50 text-red-400',
+    interrupted: 'bg-orange-100 text-orange-600',
   }
   return (
     <span class={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium ${colors[v.verdict]}`}>
@@ -104,6 +105,13 @@ export function GroupMessages() {
         {state.topic && (
           <div class="px-2 py-1 rounded bg-zinc-100 text-xs font-medium text-zinc-600">
             {state.topic}
+          </div>
+        )}
+
+        {state.goal && (
+          <div class="px-2 py-1.5 rounded bg-cyan-50 border border-cyan-200 text-xs text-cyan-700">
+            <span class="font-semibold uppercase tracking-wide text-[10px] text-cyan-500">Goal</span>
+            <p class="mt-0.5">{state.goal}</p>
           </div>
         )}
 

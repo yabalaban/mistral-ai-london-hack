@@ -5,18 +5,36 @@ import { truncate } from '../../utils/format.ts'
 import { agentMap } from '../../state/agents.ts'
 import { NewGroupModal } from '../roster/NewGroupModal.tsx'
 import { createGroupConversation } from '../../utils/conversations.ts'
+import { mobileSidebarOpen } from '../../state/ui.ts'
 
 export function Sidebar() {
   const [showNewGroup, setShowNewGroup] = useState(false)
+  const isOpen = mobileSidebarOpen.value
 
   const handleCreateGroup = async (agentIds: string[]) => {
     setShowNewGroup(false)
     await createGroupConversation(agentIds)
   }
 
+  const closeSidebar = () => {
+    mobileSidebarOpen.value = false
+  }
+
   return (
     <>
-      <div class="w-60 min-w-60 glass-strong border-r border-zinc-200 flex flex-col h-full">
+      {/* Mobile overlay backdrop */}
+      {isOpen && (
+        <div
+          class="fixed inset-0 bg-black/40 z-40 md:hidden"
+          onClick={closeSidebar}
+        />
+      )}
+      <div class={`
+        w-60 min-w-60 glass-strong border-r border-zinc-200 flex flex-col h-full
+        fixed inset-y-0 left-0 z-50 transition-transform duration-200
+        ${isOpen ? 'translate-x-0' : '-translate-x-full'}
+        md:static md:translate-x-0
+      `}>
         <div class="h-14 min-h-14 flex items-center px-4 border-b border-zinc-200">
           <div class="flex items-center gap-2">
             <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
@@ -45,6 +63,7 @@ export function Sidebar() {
               <a
                 key={conv.id}
                 href={isGroup ? `/group/${conv.id}` : `/chat/${conv.id}`}
+                onClick={closeSidebar}
                 class="flex items-center gap-2 px-2 py-1.5 rounded-xl hover:bg-zinc-100 text-zinc-500 hover:text-zinc-900 transition-colors"
               >
                 {isGroup ? (

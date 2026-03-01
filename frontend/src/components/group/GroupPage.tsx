@@ -1,9 +1,8 @@
-import { useState } from 'preact/hooks'
 import { useConversation } from '../../hooks/useConversation.ts'
 import { useVoice } from '../../hooks/useVoice.ts'
 import { activeConversation, appendMessage } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
-import { activeCall, callMode, partialTranscript } from '../../state/call.ts'
+import { activeCall, callMode } from '../../state/call.ts'
 import { startCall, endCall } from '../../api/client.ts'
 import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
@@ -12,7 +11,6 @@ import { GroupMessages } from './GroupMessages.tsx'
 import { CallControls } from './CallControls.tsx'
 import { ChatInput } from '../chat/ChatInput.tsx'
 import { MessageList } from '../chat/MessageList.tsx'
-import { AgentPicker } from './AgentPicker.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
 import { generateId } from '../../utils/format.ts'
 import { USE_MOCKS } from '../../config.ts'
@@ -26,7 +24,6 @@ interface GroupPageProps {
 export function GroupPage({ id }: GroupPageProps) {
   useConversation(id ?? '')
   const { startPTT, stopPTT, teardownMic } = useVoice()
-  const [showPicker, setShowPicker] = useState(false)
 
   if (!id) return null
 
@@ -139,15 +136,6 @@ export function GroupPage({ id }: GroupPageProps) {
             </svg>
           </button>
         )}
-        <button
-          onClick={() => setShowPicker(true)}
-          class="p-2 text-zinc-400 hover:text-zinc-700 transition-colors"
-          title="Add agents"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
-          </svg>
-        </button>
       </Header>
 
       <div class="flex-1 flex overflow-hidden min-h-0">
@@ -159,11 +147,6 @@ export function GroupPage({ id }: GroupPageProps) {
           )}
           <div class="flex-1 overflow-hidden relative min-h-0">
             <MessageList messages={conv.messages} />
-            {call && mode === 'voice' && partialTranscript.value && (
-              <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-zinc-500 text-sm italic animate-pulse">
-                {partialTranscript.value}
-              </div>
-            )}
           </div>
           {(!call || mode === 'text') && (
             <ChatInput onSend={handleSend} placeholder="Type a message to the group..." />
@@ -177,19 +160,8 @@ export function GroupPage({ id }: GroupPageProps) {
             />
           )}
         </div>
-        {!call && <GroupMessages />}
+        <div class="hidden md:flex"><GroupMessages /></div>
       </div>
-
-      {showPicker && (
-        <AgentPicker
-          excludeIds={participants}
-          onSelect={(ids) => {
-            console.log('Add agents:', ids)
-            setShowPicker(false)
-          }}
-          onClose={() => setShowPicker(false)}
-        />
-      )}
     </>
   )
 }

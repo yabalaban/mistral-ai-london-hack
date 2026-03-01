@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid as _uuid
 from typing import Any, cast
 
 from mistralai import Mistral
@@ -32,6 +33,44 @@ from ensemble.utils import extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
+
+def _get_text(content: Any) -> str:
+    """Extract text from a chat completion message content.
+
+    Magistral models return content as a list of blocks instead of a string.
+    """
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("text"):
+                parts.append(block["text"])
+            elif hasattr(block, "text"):
+                parts.append(block.text)
+        return "".join(parts).strip()
+    return str(content).strip()
+
+
+_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _parse_json(text: str) -> dict:
+    """Parse JSON from text that may contain reasoning before the JSON.
+
+    Magistral models include chain-of-thought text before the actual JSON.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = _JSON_RE.search(text)
+        if match:
+            return json.loads(match.group())
+        raise
+
+
 MAX_CONTEXT_MESSAGES = 15
 MAX_ROUNDS = 10
 PASS_TOKEN = "[PASS]"
@@ -44,7 +83,7 @@ def _is_pass(text: str) -> bool:
     return s in PASS_VARIANTS or s.startswith("[pass]")
 
 
-_REPLY_PREFIX_RE = re.compile(r"^\[(\d{1,2}|[Nn])\]\s*\n?")
+_REPLY_PREFIX_RE = re.compile(r"^\[[Nn]?(\d{1,2})\]\s*\n?")
 
 
 def _parse_reply_target(text: str, index_map: dict[str, str]) -> tuple[str | None, str]:
@@ -63,27 +102,18 @@ def _parse_reply_target(text: str, index_map: dict[str, str]) -> tuple[str | Non
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 CLASSIFIER_SYSTEM = """\
-You classify user messages in a group chat to decide the response strategy, \
-and infer the user's concrete goal.
+You classify user messages in a group chat and infer the user's concrete goal.
 
-**parallel** — casual, social, greetings, banter, simple acknowledgements.
-Everyone can respond at once. Examples: "hey everyone", "thanks!", "lol", \
-"good morning", "how's it going"
+**parallel** — casual or social messages where everyone can respond at once.
+**sequential** — substantive requests that benefit from agents building on \
+each other's responses.
 
-**sequential** — substantive questions, requests, ideas, debates, anything \
-that benefits from agents building on each other's responses.
-Examples: "generate a startup idea", "what do you think about X", \
-"can someone explain Y", "let's brainstorm"
-
-**goal** — a concise, evaluable description of what the user wants achieved.
-Examples:
-- "brainstorm 3 ideas" → "produce 3 distinct ideas with brief descriptions"
-- "hey everyone" → "greet the user"
-- "what do you think about X" → "provide opinions and analysis on X"
-- "can someone explain Y" → "explain Y clearly"
+**goal** — a concise, evaluable description of what the user wants achieved. \
+Include any specific quantities or criteria mentioned. If the message is \
+casual, the goal should be simple (e.g. "greet the user").
 
 Return JSON:
-{"mode": "parallel" or "sequential", "goal": "<concise goal>"}
+{"mode": "parallel" or "sequential", "goal": "<concise evaluable goal>"}
 """
 
 GRADER_SYSTEM = """\
@@ -91,33 +121,43 @@ You are a conversation grader. Given the original user message and all agent \
 responses so far, decide if the conversation round is complete.
 
 The user's goal is: {goal}
+Mode: {mode}
 
-Evaluate whether responses have achieved this goal. \
-Lean toward done if substantially met. Disagreement between agents is \
-fine and doesn't require resolution. Only say NOT done if a critical \
-aspect of the goal is clearly unaddressed.
+If mode is "parallel" (casual/social), the goal is met as soon as agents \
+have acknowledged or responded — done after one round. Don't require depth.
+
+If mode is "sequential" (substantive), evaluate whether responses have \
+achieved the goal. Lean toward done if substantially met. Only say NOT done \
+if a critical aspect of the goal is clearly unaddressed.
 
 Return JSON:
 {{"reasoning": "<1 sentence>", "done": true/false}}
 """
 
 AGENT_CONTEXT_TEMPLATE = """\
-[Thread — you're {name}]
+[Thread — you're {name}, {role}]
+[Participants]:
+{participants}
 [User said]: {user_message}
 [Topic]: {topic}
 {hint_line}
+{summary_line}
 
 {context}
 
-Reply to the most relevant message by starting with its number in brackets.
-For example, to reply to message [1], start with [1]. To reply to [3], start with [3].
+Start with the number of the message you're responding to in brackets, \
+e.g. [1] to respond to message 1, [3] to respond to message 3.
 
-Reply naturally (1-2 sentences, like a human in a group chat). \
-Don't repeat what others already said.
-Don't start your reply by addressing someone by name — it's a thread, context is clear.
-Don't end with a question unless you genuinely need an answer.
-
-If you have nothing meaningful to contribute, reply with exactly: [PASS]
+Guidelines:
+- Stay in your lane — contribute from your expertise as {role}. \
+Don't give advice outside your domain; let others cover theirs. \
+You can call on another participant by name if their expertise is needed.
+- Build on what others said — add new information, a different angle, or a \
+concrete next step. Never restate what's already been covered.
+- Be substantive: provide actionable ideas, specific details, or clear opinions. \
+Avoid filler, hedging, and generic encouragement.
+- Keep it very short — 1-2 sentences max. This is a voice conversation.
+- If you have nothing new to add, reply with exactly: [PASS]
 """
 
 RANKER_SYSTEM = """\
@@ -126,13 +166,19 @@ You rank which agents should respond to a message in a group chat.
 Agents:
 {agent_descriptions}
 
+First, classify the message as "generic" or "specialised":
+- **generic** — greetings, casual chat, open-ended questions, opinions everyone \
+can weigh in on. All agents should respond.
+- **specialised** — requires specific domain expertise. Only agents with \
+relevant expertise should respond.
+
 Rules:
-- Casual/social messages (greetings, thanks, banter) → everyone responds
-- Topic-specific messages → only agents with relevant expertise respond
-- At least one agent must respond
+- generic → all agents respond (should_respond: true for everyone)
+- specialised → only matching agents respond, others get should_respond: false
 - Order by relevance (most relevant first)
-- The hint is a short phrase (3-5 words) guiding the agent's angle, or null
-- last_speaker can appear again if they have more to add (self-reply)
+- The hint guides the agent's angle — make it specific and actionable (3-5 words)
+- At least one agent must respond
+- last_speaker can appear again if they have more to add
 
 User message: {user_message}
 Topic: {topic}
@@ -140,8 +186,39 @@ Last speaker: {last_speaker}
 Prior responses: {prior_summary}
 
 Return JSON:
-{{"ranking": [{{"agent_id": "...", "should_respond": true/false, "hint": "..." or null}}, ...]}}
+{{"type": "generic" or "specialised", "ranking": [{{"agent_id": "...", "should_respond": true/false, "hint": "..." or null}}, ...]}}
 """
+
+INTERRUPTION_SYSTEM = """\
+You decide whether to interrupt the current speaker in a voice group chat.
+
+Goal: {goal}
+Speaker: {agent_name} ({agent_role})
+Their response so far: {partial_text}
+Agents waiting to speak: {waiting_agents}
+
+Interrupt if the speaker has made their main point and other perspectives \
+are needed. Don't interrupt if the response is still building to an \
+important point or is very short.
+
+Return JSON: {{"interrupt": true/false, "reasoning": "1 sentence"}}
+"""
+
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s|$)")
+
+
+def _count_sentences(text: str) -> int:
+    """Count completed sentences in text."""
+    return len(_SENTENCE_BOUNDARY_RE.findall(text))
+
+
+def _trim_to_last_sentence(text: str) -> str:
+    """Trim text to the last complete sentence boundary."""
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] in ".!?":
+            return text[: i + 1]
+    return text
+
 
 TOPIC_GRADER_SYSTEM = """\
 You grade whether a set of user messages contains a clear discussion topic.
@@ -184,7 +261,7 @@ class OracleEngine:
                 ]),
                 response_format={"type": "json_object"},
             )
-            data = json.loads(response.choices[0].message.content.strip())
+            data = _parse_json(_get_text(response.choices[0].message.content))
             mode = data.get("mode", "sequential")
             if mode not in ("parallel", "sequential"):
                 mode = "sequential"
@@ -196,13 +273,20 @@ class OracleEngine:
             return "sequential", fallback_goal
 
     async def grade_completion(
-        self, conversation: Conversation, user_message: str, goal: str = "",
+        self,
+        conversation: Conversation,
+        user_message: str,
+        goal: str = "",
+        mode: str = "sequential",
     ) -> tuple[bool, str]:
         """Grade whether the conversation round is complete against the goal."""
         # Grader sees ALL messages (not limited to MAX_CONTEXT_MESSAGES)
         # so it can evaluate cumulative progress toward the goal.
         history_lines, _ = self._format_history(conversation.messages)
-        grader_prompt = GRADER_SYSTEM.format(goal=goal or "address the user's message")
+        grader_prompt = GRADER_SYSTEM.format(
+            goal=goal or "address the user's message",
+            mode=mode,
+        )
         try:
             response = await self._client.chat.complete_async(
                 model=settings.oracle_model,
@@ -216,7 +300,7 @@ class OracleEngine:
                 ]),
                 response_format={"type": "json_object"},
             )
-            data = json.loads(response.choices[0].message.content.strip())
+            data = _parse_json(_get_text(response.choices[0].message.content))
             return data.get("done", True), data.get("reasoning", "")
         except Exception:
             logger.exception("Grade completion failed")
@@ -242,7 +326,7 @@ class OracleEngine:
                 ]),
                 response_format={"type": "json_object"},
             )
-            data = json.loads(response.choices[0].message.content.strip())
+            data = _parse_json(_get_text(response.choices[0].message.content))
             if data.get("has_topic") and data.get("topic"):
                 return data["topic"]
             return None
@@ -296,7 +380,7 @@ class OracleEngine:
                 ]),
                 response_format={"type": "json_object"},
             )
-            data = json.loads(response.choices[0].message.content.strip())
+            data = _parse_json(_get_text(response.choices[0].message.content))
             ranking = data.get("ranking", [])
 
             # Validate: only keep known agent IDs
@@ -318,6 +402,51 @@ class OracleEngine:
             logger.exception("Ranker failed, including all agents")
             return [{"agent_id": aid, "should_respond": True, "hint": None}
                     for aid in agent_ids]
+
+    async def check_interruption(
+        self,
+        agent_id: str,
+        partial_text: str,
+        goal: str,
+        remaining_agent_ids: list[str],
+    ) -> tuple[bool, str]:
+        """Check if the current speaker should be interrupted mid-turn."""
+        agent = self._registry.get(agent_id)
+        name = agent.name if agent else agent_id
+        role = agent.role if agent else "Agent"
+
+        waiting = []
+        for aid in remaining_agent_ids:
+            a = self._registry.get(aid)
+            if a:
+                waiting.append(f"{a.name} ({a.role})")
+
+        try:
+            response = await self._client.chat.complete_async(
+                model=settings.oracle_model,
+                messages=cast(Any, [
+                    {"role": "system", "content": INTERRUPTION_SYSTEM.format(
+                        goal=goal,
+                        agent_name=name,
+                        agent_role=role,
+                        partial_text=partial_text,
+                        waiting_agents=", ".join(waiting) or "none",
+                    )},
+                    {"role": "user", "content": "Should we interrupt?"},
+                ]),
+                response_format={"type": "json_object"},
+            )
+            data = _parse_json(_get_text(response.choices[0].message.content))
+            should = data.get("interrupt", False)
+            reasoning = data.get("reasoning", "")
+            logger.info(
+                "Interruption check for %s: interrupt=%s reason=%s",
+                name, should, reasoning,
+            )
+            return should, reasoning
+        except Exception:
+            logger.exception("Interruption check failed")
+            return False, "Check failed"
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -350,14 +479,23 @@ class OracleEngine:
         index_map: dict[str, str] = {}
         idx = 1
         for msg in messages:
+            # Build attachment suffix so agents know about shared images
+            attachment_suffix = ""
+            if msg.attachments:
+                img_count = sum(1 for a in msg.attachments if a.type == "image")
+                if img_count == 1:
+                    attachment_suffix = " [Image attached]"
+                elif img_count > 1:
+                    attachment_suffix = f" [{img_count} images attached]"
+
             if msg.role == MessageRole.USER:
-                lines.append(f"[{idx}] **User**: {msg.content}")
+                lines.append(f"[{idx}] **User**: {msg.content}{attachment_suffix}")
                 index_map[str(idx)] = msg.id
                 idx += 1
             elif msg.role == MessageRole.AGENT and msg.agent_id:
                 agent = self._registry.get(msg.agent_id)
                 name = agent.name if agent else msg.agent_id
-                lines.append(f"[{idx}] **{name}**: {msg.content[:400]}")
+                lines.append(f"[{idx}] **{name}**: {msg.content[:400]}{attachment_suffix}")
                 index_map[str(idx)] = msg.id
                 idx += 1
         return lines, index_map
@@ -370,12 +508,22 @@ class OracleEngine:
     ) -> tuple[str, dict[str, str]]:
         """Build the context prompt for an agent.
 
+        Uses summary for prior turns and full messages only since the last
+        user message, so agents see concise history + current round detail.
+
         Returns (prompt, index_map) where index_map maps "1","2",... to msg IDs.
         """
-        recent = conversation.messages[-MAX_CONTEXT_MESSAGES:]
-        context_lines, index_map = self._format_history(recent)
+        # Find messages since the last user message (current round)
+        current_round_msgs: list[Message] = []
+        for msg in reversed(conversation.messages):
+            current_round_msgs.insert(0, msg)
+            if msg.role == MessageRole.USER:
+                break
+
+        context_lines, index_map = self._format_history(current_round_msgs)
         agent = self._registry.get(agent_id)
         name = agent.name if agent else agent_id
+        role = agent.role if agent else "Agent"
 
         user_message = ""
         for msg in reversed(conversation.messages):
@@ -390,11 +538,28 @@ class OracleEngine:
         topic = conversation.topic if has_topic else "none"
         hint_line = f"[Focus]: {hint}" if hint else ""
 
+        # Build participant roster
+        participants = []
+        for aid in conversation.participant_agent_ids:
+            a = self._registry.get(aid)
+            if a:
+                tag = " (you)" if aid == agent_id else ""
+                participants.append(f"- {a.name}, {a.role}{tag}")
+        participants_line = "\n".join(participants)
+
+        # Prepend summary of prior turns if available
+        summary_line = ""
+        if conversation.last_summary:
+            summary_line = f"[Prior discussion summary]: {conversation.last_summary}"
+
         prompt = AGENT_CONTEXT_TEMPLATE.format(
             name=name,
+            role=role,
+            participants=participants_line,
             user_message=user_message,
             topic=topic,
             hint_line=hint_line,
+            summary_line=summary_line,
             context=(
                 "\n".join(context_lines) if context_lines else "(empty)"
             ),
@@ -508,6 +673,8 @@ class OracleEngine:
 
         # --- CLASSIFY ---
         mode, goal = await self.classify_message(content)
+        if voice_mode:
+            mode = "sequential"
         turn_record.goal = goal
         agent_ids = self._get_ready_agents(conversation)
         if not agent_ids:
@@ -591,6 +758,7 @@ class OracleEngine:
             async for ev_type, ev_data in runner(
                 conversation, ranked_ids, voice_mode, reply_to_id,
                 hint_map=hint_map,
+                goal=goal,
             ):
                 yield (ev_type, ev_data)
                 if ev_type == "message":
@@ -622,7 +790,7 @@ class OracleEngine:
             # Grader (skip on last allowed round)
             if round_num < MAX_ROUNDS - 1:
                 done, reasoning = await self.grade_completion(
-                    conversation, content, goal=goal,
+                    conversation, content, goal=goal, mode=mode,
                 )
                 logger.info(
                     "Grader round %d: done=%s reason=%s",
@@ -654,6 +822,7 @@ class OracleEngine:
             )
             if summary:
                 turn_record.summary = summary
+                conversation.last_summary = summary
                 yield ("summary", {"content": summary})
 
         yield ("oracle_end", {})
@@ -668,6 +837,7 @@ class OracleEngine:
         voice_mode: bool,
         reply_to_id: str | None,
         hint_map: dict[str, str | None] | None = None,
+        goal: str = "",
     ):
         """All agents respond concurrently. Yields events via queue."""
         hint_map = hint_map or {}
@@ -732,6 +902,7 @@ class OracleEngine:
         voice_mode: bool,
         reply_to_id: str | None,
         hint_map: dict[str, str | None] | None = None,
+        goal: str = "",
     ):
         """Agents respond one-by-one, each seeing prior responses."""
         hint_map = hint_map or {}
@@ -741,6 +912,10 @@ class OracleEngine:
             agent = self._registry.get(aid)
             if not agent or not agent.mistral_agent_id:
                 continue
+
+            msg_id = _uuid.uuid4().hex[:12]
+            was_interrupted = False
+            prev_sentences = 0
 
             # Rebuild prompt so this agent sees previous agents' responses
             prompt, index_map = self._build_agent_prompt(
@@ -759,22 +934,41 @@ class OracleEngine:
                 agent_inputs = VOICE_MODE_PREFIX + prompt
 
             try:
-                if mistral_conv_id:
-                    stream = (
-                        await self._client.beta.conversations
-                        .append_stream_async(
-                            conversation_id=mistral_conv_id,
-                            inputs=agent_inputs,
-                        )
-                    )
-                else:
-                    stream = (
-                        await self._client.beta.conversations
-                        .start_stream_async(
-                            agent_id=agent.mistral_agent_id,
-                            inputs=agent_inputs,
-                        )
-                    )
+                # Retry loop for Mistral 409 Conflict (conversation lock)
+                max_retries = 3
+                stream = None
+                for attempt in range(max_retries):
+                    try:
+                        if mistral_conv_id:
+                            stream = (
+                                await self._client.beta.conversations
+                                .append_stream_async(
+                                    conversation_id=mistral_conv_id,
+                                    inputs=agent_inputs,
+                                )
+                            )
+                        else:
+                            stream = (
+                                await self._client.beta.conversations
+                                .start_stream_async(
+                                    agent_id=agent.mistral_agent_id,
+                                    inputs=agent_inputs,
+                                )
+                            )
+                        break  # success — exit retry loop
+                    except Exception as exc:
+                        if "409" in str(exc) and attempt < max_retries - 1:
+                            delay = 1.0 * (attempt + 1)
+                            logger.warning(
+                                "Mistral 409 on agent %s attempt %d, retrying in %.1fs",
+                                aid, attempt + 1, delay,
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            raise
+
+                if stream is None:
+                    continue
 
                 async for event in stream:
                     data = event.data
@@ -796,7 +990,7 @@ class OracleEngine:
                                 if len(full_text) >= prefix_len:
                                     if _is_pass(full_text):
                                         continue
-                                    # Parse >>ID prefix
+                                    # Parse [N] reply prefix
                                     target, cleaned = _parse_reply_target(
                                         full_text, index_map
                                     )
@@ -824,6 +1018,48 @@ class OracleEngine:
                                     "chunk",
                                     {"agent_id": aid, "content": text},
                                 )
+                                # Voice: sentence tracking + interruption
+                                if voice_mode:
+                                    curr = _count_sentences(full_text)
+                                    if curr > prev_sentences:
+                                        prev_sentences = curr
+                                        yield ("message_partial", {
+                                            "agent_id": aid,
+                                            "content": full_text,
+                                            "message_id": msg_id,
+                                            "reply_to_id": agent_reply_to,
+                                        })
+                                        remaining = agent_ids[
+                                            agent_ids.index(aid) + 1 :
+                                        ]
+                                        if (
+                                            curr >= 2
+                                            and curr % 2 == 0
+                                            and remaining
+                                        ):
+                                            should, reason = (
+                                                await self.check_interruption(
+                                                    aid,
+                                                    full_text,
+                                                    goal,
+                                                    remaining,
+                                                )
+                                            )
+                                            if should:
+                                                logger.info(
+                                                    "Interrupting %s: %s",
+                                                    aid,
+                                                    reason,
+                                                )
+                                                yield (
+                                                    "agent_cancel",
+                                                    {
+                                                        "agent_id": aid,
+                                                        "reasoning": reason,
+                                                    },
+                                                )
+                                                was_interrupted = True
+                                                break
 
                 # Handle unflushed buffer
                 if not flushed:
@@ -860,10 +1096,16 @@ class OracleEngine:
                             )
 
                 if full_text and flushed:
+                    final_text = (
+                        _trim_to_last_sentence(full_text)
+                        if was_interrupted
+                        else full_text
+                    )
                     msg = Message(
+                        id=msg_id,
                         role=MessageRole.AGENT,
                         agent_id=aid,
-                        content=full_text,
+                        content=final_text,
                         reply_to_id=agent_reply_to,
                     )
                     conversation.messages.append(msg)
@@ -871,7 +1113,9 @@ class OracleEngine:
                     yield ("agent_verdict", {
                         "agent_id": aid,
                         "agent_name": agent.name,
-                        "verdict": "responded",
+                        "verdict": (
+                            "interrupted" if was_interrupted else "responded"
+                        ),
                         "reply_to_id": agent_reply_to,
                     })
                     current_reply_to = msg.id
@@ -911,20 +1155,39 @@ class OracleEngine:
             from ensemble.utils import VOICE_MODE_PREFIX
             agent_inputs = VOICE_MODE_PREFIX + prompt
 
-        if mistral_conv_id:
-            stream = (
-                await self._client.beta.conversations.append_stream_async(
-                    conversation_id=mistral_conv_id,
-                    inputs=agent_inputs,
-                )
-            )
-        else:
-            stream = (
-                await self._client.beta.conversations.start_stream_async(
-                    agent_id=agent.mistral_agent_id,
-                    inputs=agent_inputs,
-                )
-            )
+        # Retry loop for Mistral 409 Conflict (conversation lock)
+        max_retries = 3
+        stream = None
+        for attempt in range(max_retries):
+            try:
+                if mistral_conv_id:
+                    stream = (
+                        await self._client.beta.conversations.append_stream_async(
+                            conversation_id=mistral_conv_id,
+                            inputs=agent_inputs,
+                        )
+                    )
+                else:
+                    stream = (
+                        await self._client.beta.conversations.start_stream_async(
+                            agent_id=agent.mistral_agent_id,
+                            inputs=agent_inputs,
+                        )
+                    )
+                break  # success — exit retry loop
+            except Exception as exc:
+                if "409" in str(exc) and attempt < max_retries - 1:
+                    delay = 1.0 * (attempt + 1)
+                    logger.warning(
+                        "Mistral 409 on agent %s attempt %d, retrying in %.1fs",
+                        agent_id, attempt + 1, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+
+        if stream is None:
+            return full_text, flushed, agent_reply_to
 
         async for event in stream:
             data = event.data
@@ -1027,22 +1290,41 @@ class OracleEngine:
                 from ensemble.utils import VOICE_MODE_PREFIX
                 agent_inputs = VOICE_MODE_PREFIX + prompt
 
-            if mistral_conv_id:
-                stream = (
-                    await self._client.beta.conversations
-                    .append_stream_async(
-                        conversation_id=mistral_conv_id,
-                        inputs=agent_inputs,
-                    )
-                )
-            else:
-                stream = (
-                    await self._client.beta.conversations
-                    .start_stream_async(
-                        agent_id=agent.mistral_agent_id,
-                        inputs=agent_inputs,
-                    )
-                )
+            # Retry loop for Mistral 409 Conflict (conversation lock)
+            max_retries = 3
+            stream = None
+            for attempt in range(max_retries):
+                try:
+                    if mistral_conv_id:
+                        stream = (
+                            await self._client.beta.conversations
+                            .append_stream_async(
+                                conversation_id=mistral_conv_id,
+                                inputs=agent_inputs,
+                            )
+                        )
+                    else:
+                        stream = (
+                            await self._client.beta.conversations
+                            .start_stream_async(
+                                agent_id=agent.mistral_agent_id,
+                                inputs=agent_inputs,
+                            )
+                        )
+                    break  # success — exit retry loop
+                except Exception as exc:
+                    if "409" in str(exc) and attempt < max_retries - 1:
+                        delay = 1.0 * (attempt + 1)
+                        logger.warning(
+                            "Mistral 409 on agent %s attempt %d, retrying in %.1fs",
+                            agent_id, attempt + 1, delay,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+
+            if stream is None:
+                return
 
             async for event in stream:
                 data = event.data
@@ -1142,7 +1424,7 @@ class OracleEngine:
                     )},
                 ]),
             )
-            return response.choices[0].message.content.strip()
+            return _get_text(response.choices[0].message.content)
         except Exception:
             logger.exception("Summary generation failed")
             return None

@@ -3,6 +3,9 @@ import {
   streamingAgents,
   appendMessage,
   commitMessage,
+  discardStream,
+  upsertConversation,
+  upsertMessage,
   updateConversationTopic,
 } from '../state/conversations.ts'
 import {
@@ -15,6 +18,8 @@ import {
   endOracle,
 } from '../state/oracle.ts'
 import { activeCall, currentSpeaker, agentSpeaking, partialTranscript } from '../state/call.ts'
+import { errorMessage } from '../state/ui.ts'
+import { fetchConversation } from './client.ts'
 import { generateId } from '../utils/format.ts'
 
 type EventHandler = (event: WSEvent) => void
@@ -24,11 +29,21 @@ class WebSocketManager {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private currentConvId: string | null = null
   private handlers: Set<EventHandler> = new Set()
+  private isReconnect = false
+
+  /** Clear all streaming agent indicators (stale typing state). */
+  private clearStreamingAgents() {
+    for (const agentId of streamingAgents.value.keys()) {
+      discardStream(agentId)
+    }
+  }
 
   connect(convId: string) {
     if (this.currentConvId === convId && this.ws?.readyState === WebSocket.OPEN) return
+    const reconnecting = this.currentConvId === convId
     this.disconnect()
     this.currentConvId = convId
+    this.isReconnect = reconnecting
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const url = `${protocol}//${location.host}/ws/conversations/${convId}`
@@ -36,6 +51,13 @@ class WebSocketManager {
 
     this.ws.onopen = () => {
       console.log(`[WS] Connected to conversation ${convId}`)
+      if (this.isReconnect) {
+        console.log('[WS] Reconnected — re-syncing conversation state')
+        fetchConversation(convId)
+          .then((conv) => upsertConversation(conv))
+          .catch((err) => console.error('[WS] Failed to re-sync conversation', err))
+      }
+      this.isReconnect = false
     }
 
     this.ws.onmessage = (e) => {
@@ -49,6 +71,8 @@ class WebSocketManager {
 
     this.ws.onclose = (e) => {
       console.log('[WS] Disconnected', e.code, e.reason)
+      // Clear stale streaming/typing indicators on disconnect
+      this.clearStreamingAgents()
       if (e.code === 4004) return
       if (this.currentConvId === convId) {
         this.reconnectTimer = setTimeout(() => this.connect(convId), 2000)
@@ -103,8 +127,17 @@ class WebSocketManager {
       case 'message_complete':
         commitMessage(event.message.agent_id ?? '', event.message)
         break
+      case 'message_partial': {
+        // Remove from streaming indicator — partial text is now visible inline
+        const partialMap = new Map(streamingAgents.value)
+        partialMap.delete(event.message.agent_id ?? '')
+        streamingAgents.value = partialMap
+        // Upsert: append if first partial, update content if subsequent
+        upsertMessage(event.message)
+        break
+      }
       case 'oracle_start':
-        startOracle(event.directed, event.directed_agent)
+        startOracle(event.directed, event.directed_agent, event.goal)
         break
       case 'oracle_end':
         endOracle()
@@ -165,16 +198,24 @@ class WebSocketManager {
       case 'partial_transcript':
         partialTranscript.value = event.text
         break
-      case 'agent_speaking':
+      case 'agent_speaking': {
         agentSpeaking.value = event.agent_id
         currentSpeaker.value = event.agent_id
+        const speakMap = new Map(streamingAgents.value)
+        speakMap.set(event.agent_id, { agentId: event.agent_id })
+        streamingAgents.value = speakMap
         break
-      case 'agent_done':
+      }
+      case 'agent_done': {
         if (agentSpeaking.value === event.agent_id) {
           agentSpeaking.value = null
         }
         currentSpeaker.value = null
+        const doneMap = new Map(streamingAgents.value)
+        doneMap.delete(event.agent_id)
+        streamingAgents.value = doneMap
         break
+      }
       case 'interrupt':
         agentSpeaking.value = null
         currentSpeaker.value = null
@@ -189,6 +230,11 @@ class WebSocketManager {
           content: `${event.by} interrupted ${event.agent_id}`,
           timestamp: new Date().toISOString(),
         })
+        break
+      case 'error':
+        console.error('[WS] Server error:', event.message)
+        errorMessage.value = event.message
+        this.clearStreamingAgents()
         break
       default:
         break

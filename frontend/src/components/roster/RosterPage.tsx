@@ -44,7 +44,7 @@ export function RosterPage(_props: RosterPageProps) {
         <Button variant="secondary" onClick={() => setShowNewGroup(true)}>New Group Chat</Button>
         <Button onClick={() => setShowCreateAgent(true)}>Add Agent</Button>
       </Header>
-      <div class="flex-1 overflow-y-auto p-8">
+      <div class="flex-1 overflow-y-auto p-4 md:p-8">
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 max-w-5xl">
           {agents.value.map((agent) => (
             <AgentCard key={agent.id} agent={agent} />

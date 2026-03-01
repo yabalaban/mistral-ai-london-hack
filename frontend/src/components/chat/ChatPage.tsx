@@ -2,7 +2,7 @@ import { useConversation } from '../../hooks/useConversation.ts'
 import { useVoice } from '../../hooks/useVoice.ts'
 import { activeConversation, appendMessage } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
-import { activeCall, callMode, partialTranscript } from '../../state/call.ts'
+import { activeCall, callMode } from '../../state/call.ts'
 import { startCall, endCall } from '../../api/client.ts'
 import { wsManager } from '../../api/ws.ts'
 import { Header } from '../layout/Header.tsx'
@@ -127,11 +127,6 @@ export function ChatPage({ id }: ChatPageProps) {
           <div class="flex-1 flex flex-col min-w-0 min-h-0">
             <div class="flex-1 overflow-hidden relative min-h-0">
               <MessageList messages={conv.messages} />
-              {call && mode === 'voice' && partialTranscript.value && (
-                <div class="absolute bottom-2 left-4 right-4 px-4 py-2 glass rounded-lg text-zinc-500 text-sm italic animate-pulse">
-                  {partialTranscript.value}
-                </div>
-              )}
             </div>
             {(!call || mode === 'text') && (
               <ChatInput onSend={handleSend} placeholder={`Message ${agent?.name ?? 'agent'}...`} />
@@ -145,7 +140,7 @@ export function ChatPage({ id }: ChatPageProps) {
               />
             )}
           </div>
-          {agent && <AgentProfilePanel agent={agent} />}
+          {agent && <div class="hidden md:flex"><AgentProfilePanel agent={agent} /></div>}
         </div>
       )}
     </>

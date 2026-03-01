@@ -3,6 +3,7 @@ import type { Message } from '../../types/index.ts'
 import { MessageBubble } from './MessageBubble.tsx'
 import { streamingAgents } from '../../state/conversations.ts'
 import { agentMap } from '../../state/agents.ts'
+import { agentSpeaking, partialTranscript } from '../../state/call.ts'
 import { Avatar } from '../shared/Avatar.tsx'
 
 interface MessageListProps {
@@ -12,15 +13,19 @@ interface MessageListProps {
 export function MessageList({ messages }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const streams = streamingAgents.value
+  const transcript = partialTranscript.value
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, streams.size])
+  }, [messages.length, streams.size, transcript])
 
-  // Build typing names from streaming agents
-  const typingNames = [...streams.values()]
+  // Build typing/speaking names from streaming agents
+  const activeNames = [...streams.values()]
     .map((s) => agentMap.value.get(s.agentId)?.name)
     .filter(Boolean)
+
+  const isSpeaking = !!agentSpeaking.value
+  const verb = isSpeaking ? 'speaking' : 'typing'
 
   return (
     <div class="absolute inset-0 overflow-y-auto py-4">
@@ -32,7 +37,20 @@ export function MessageList({ messages }: MessageListProps) {
       {messages.map((msg) => (
         <MessageBubble key={msg.id} message={msg} />
       ))}
-      {typingNames.length > 0 && (
+      {transcript && (
+        <div class="flex gap-3 px-4 py-2 items-center">
+          <Avatar name="You" size="sm" />
+          <div class="flex items-center gap-1.5 text-sm text-zinc-400 italic">
+            <span>{transcript}</span>
+            <span class="flex gap-0.5 ml-0.5">
+              <span class="w-1 h-1 rounded-full bg-zinc-400 dot-pulse-1" />
+              <span class="w-1 h-1 rounded-full bg-zinc-400 dot-pulse-2" />
+              <span class="w-1 h-1 rounded-full bg-zinc-400 dot-pulse-3" />
+            </span>
+          </div>
+        </div>
+      )}
+      {activeNames.length > 0 && (
         <div class="flex gap-3 px-4 py-2 items-center">
           <div class="flex -space-x-2">
             {[...streams.values()].map((s) => {
@@ -44,7 +62,7 @@ export function MessageList({ messages }: MessageListProps) {
           </div>
           <div class="flex items-center gap-1.5 text-sm text-zinc-400">
             <span>
-              {typingNames.join(', ')} {typingNames.length === 1 ? 'is' : 'are'} typing
+              {activeNames.join(', ')} {activeNames.length === 1 ? 'is' : 'are'} {verb}
             </span>
             <span class="flex gap-0.5 ml-0.5">
               <span class="w-1 h-1 rounded-full bg-zinc-400 dot-pulse-1" />

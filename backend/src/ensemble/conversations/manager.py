@@ -6,6 +6,7 @@ including function call (tool use) handling.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -171,7 +172,7 @@ async def _handle_function_calls(client, response, conv, agent_id, max_rounds: i
 
                 handler = TOOL_HANDLERS.get(fn_name)
                 if handler:
-                    result = handler(**args)
+                    result = await asyncio.to_thread(handler, **args)
                     result_str = json.dumps(result)
                     logger.info("Tool %s returned: %s", fn_name, result_str[:200])
                 else:
