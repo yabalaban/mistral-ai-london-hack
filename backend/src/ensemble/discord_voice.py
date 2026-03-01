@@ -185,10 +185,10 @@ class DiscordVoiceHandler:
 
                     logger.info("Final transcript: %r", text)
 
-                    # Post transcription in text channel
+                    # Post transcription in text channel (silent — no push notification)
                     if self._text_channel:
                         try:
-                            await self._text_channel.send(f"🎤 {text}")
+                            await self._text_channel.send(f"🎤 {text}", silent=True)
                         except discord.HTTPException:
                             pass
 
@@ -227,11 +227,11 @@ class DiscordVoiceHandler:
                     logger.info("  message from %s (%d chars)", msg.agent_id, len(msg.content or ""))
                     agent = self.registry.get(msg.agent_id)
                     if agent and msg.content:
-                        # Post text for attribution
+                        # Post text for attribution (silent — no push notification)
                         if self._text_channel:
                             try:
                                 await self.webhook_mgr.send_as_agent(
-                                    self._text_channel, agent, msg.content
+                                    self._text_channel, agent, msg.content, silent=True
                                 )
                             except Exception:
                                 logger.exception("Failed to send text for %s", msg.agent_id)

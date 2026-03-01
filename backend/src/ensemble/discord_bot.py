@@ -155,6 +155,7 @@ class WebhookManager:
         content: str,
         *,
         thread: discord.Thread | None = None,
+        silent: bool = False,
     ) -> discord.WebhookMessage:
         wh = await self.get_webhook(channel, agent)
         avatar = (
@@ -177,6 +178,8 @@ class WebhookManager:
                 kwargs["avatar_url"] = avatar
             if thread:
                 kwargs["thread"] = thread
+            if silent:
+                kwargs["flags"] = discord.MessageFlags(suppress_notifications=True)
             # Attach the slides embed to the last chunk
             if slide_embed and i == len(chunks) - 1:
                 kwargs["embeds"] = [slide_embed]
@@ -314,24 +317,52 @@ class CirclesBot(discord.Bot):
             if self.voice_handler.is_connected:
                 return
 
-            # Find a text channel to post transcriptions in
+            # Find matching text channel by exact name
+            voice_name = after.channel.name.lower().strip()
             text_channel = None
-            if after.channel.category:
-                for ch in after.channel.category.text_channels:
+            for ch in member.guild.text_channels:
+                if ch.name.lower().strip() == voice_name:
                     text_channel = ch
                     break
-            if not text_channel and member.guild.text_channels:
-                text_channel = member.guild.text_channels[0]
 
             if not text_channel:
+                logger.warning("No text channel matching voice channel #%s", after.channel.name)
+                # Try to notify any channel in same category
+                fallback = None
+                if after.channel.category:
+                    for ch in after.channel.category.text_channels:
+                        fallback = ch
+                        break
+                if fallback:
+                    try:
+                        await fallback.send(
+                            f"No text channel named **#{after.channel.name}** found — "
+                            f"create one to enable voice agents."
+                        )
+                    except Exception:
+                        pass
                 return
 
             state = _get_state(text_channel.id)
+            logger.info(
+                "Voice #%s → text #%s (%d agents)",
+                after.channel.name, text_channel.name, len(state.agent_ids),
+            )
+
+            if not state.agent_ids:
+                try:
+                    await text_channel.send(
+                        f"No agents in **#{text_channel.name}** — use `/invite` to add agents before joining voice."
+                    )
+                except Exception:
+                    pass
+                return
 
             try:
                 await self.voice_handler.join(after.channel, text_channel, state.conv)
                 await text_channel.send(
-                    f"🎙️ Joined **{after.channel.name}** — unmute to talk, mute to send!"
+                    f"Joined **{after.channel.name}** — unmute to talk, mute to send!",
+                    silent=True,
                 )
             except Exception:
                 logger.exception("Auto-join voice failed")
