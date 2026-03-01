@@ -32,6 +32,7 @@ async def synthesize(
     client = AsyncElevenLabs(api_key=settings.elevenlabs_api_key)
     vid = voice_id or DEFAULT_VOICE_ID
 
+    logger.info("TTS synthesize: voice_id=%s, text=%d chars, model=%s", vid, len(text), model_id)
     audio_data = b""
     audio_stream = client.text_to_speech.stream(
         text=text,
@@ -41,6 +42,7 @@ async def synthesize(
     async for chunk in audio_stream:
         if isinstance(chunk, bytes):
             audio_data += chunk
+    logger.info("TTS synthesize complete: %d bytes", len(audio_data))
     return audio_data
 
 

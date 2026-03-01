@@ -15,7 +15,7 @@ from ensemble.config import settings
 
 logger = logging.getLogger(__name__)
 
-STT_BATCH_MODEL = "mistral-stt-latest"
+STT_BATCH_MODEL = "voxtral-mini-latest"
 
 
 async def transcribe_audio(client: Mistral, audio_data: bytes, language: str = "en") -> str:
@@ -67,8 +67,9 @@ class RealtimeSTTSession:
         await session.close()
     """
 
-    def __init__(self, *, language: str = "en", on_commit: Any = None) -> None:
+    def __init__(self, *, language: str = "en", on_commit: Any = None, auto_commit: bool = False) -> None:
         self._language = language
+        self._auto_commit = auto_commit
         self._connection: Any = None
         self._queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
         self._closed = False
@@ -84,15 +85,17 @@ class RealtimeSTTSession:
             raise RuntimeError("ELEVENLABS_API_KEY not set")
 
         client = ElevenLabs(api_key=settings.elevenlabs_api_key)
+        self._audio_chunk_count = 0
 
-        logger.info("STT connecting via ElevenLabs SDK (manual commit, PCM 16kHz)")
+        strategy = CommitStrategy.VAD if self._auto_commit else CommitStrategy.MANUAL
+        logger.info("STT connecting via ElevenLabs SDK (%s commit, PCM 16kHz)", strategy)
         self._connection = await client.speech_to_text.realtime.connect(
             RealtimeAudioOptions(
                 model_id="scribe_v2_realtime",
                 language_code=self._language,
                 audio_format=AudioFormat.PCM_16000,
                 sample_rate=16000,
-                commit_strategy=CommitStrategy.MANUAL,
+                commit_strategy=strategy,
             )
         )
 
@@ -120,6 +123,8 @@ class RealtimeSTTSession:
 
         def on_close() -> None:
             logger.info("STT connection closed")
+            self._closed = True
+            self._connection = None
             self._queue.put_nowait(None)
 
         self._connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, on_partial)
@@ -145,8 +150,11 @@ class RealtimeSTTSession:
         """Force-commit the current audio segment (call on PTT release)."""
         if self._connection is None or self._closed:
             return
+        if self._audio_chunk_count == 0:
+            logger.info("STT commit skipped — no audio sent yet")
+            return
         try:
-            logger.info("STT committing (PTT release)")
+            logger.info("STT committing (PTT release, %d chunks sent)", self._audio_chunk_count)
             await self._connection.commit()
         except Exception:
             logger.exception("Failed to commit STT")

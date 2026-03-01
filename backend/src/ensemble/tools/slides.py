@@ -64,7 +64,6 @@ logger = logging.getLogger(__name__)
 
 # In-memory store for generated presentations
 _presentations: dict[str, str] = {}  # id -> HTML
-_pdfs: dict[str, bytes] = {}  # id -> PDF bytes
 
 SLIDES_TOOL_SCHEMA = {
     "type": "function",
@@ -125,26 +124,21 @@ def create_slides(
     slides: list[dict],
     author: str = "",
 ) -> dict[str, str]:
-    """Generate a Reveal.js presentation, store it, and generate PDF.
+    """Generate a Reveal.js presentation and store it.
 
-    Returns presentation_id, view URL, and PDF URL.
+    Returns presentation_id and view URL.
     """
     pres_id = uuid.uuid4().hex[:12]
     html_content = _render_revealjs(title, slides, author)
     _presentations[pres_id] = html_content
+    logger.info("Created presentation %s: %s (%d slides)", pres_id, title, len(slides))
 
-    # Generate PDF in background
-    try:
-        pdf_bytes = _render_pdf(html_content)
-        _pdfs[pres_id] = pdf_bytes
-        logger.info("Created presentation + PDF %s: %s (%d slides)", pres_id, title, len(slides))
-    except Exception:
-        logger.exception("PDF generation failed for %s", pres_id)
+    from ensemble.config import settings
 
+    base = settings.base_url.rstrip("/")
     return {
         "presentation_id": pres_id,
-        "url": f"/api/slides/{pres_id}",
-        "pdf_url": f"/api/slides/{pres_id}/pdf",
+        "url": f"{base}/api/slides/{pres_id}",
         "message": f"Presentation '{title}' created with {len(slides)} slides.",
     }
 
@@ -154,57 +148,9 @@ def get_presentation(pres_id: str) -> str | None:
     return _presentations.get(pres_id)
 
 
-def get_pdf(pres_id: str) -> bytes | None:
-    """Retrieve a generated presentation PDF."""
-    return _pdfs.get(pres_id)
-
-
 def list_presentations() -> list[str]:
     """List all presentation IDs."""
     return list(_presentations.keys())
-
-
-def _render_pdf(html_content: str) -> bytes:
-    """Render HTML slides to PDF using Playwright (headless Chromium).
-
-    Uses Reveal.js print-pdf mode for proper slide layout.
-    """
-    import tempfile
-
-    from playwright.sync_api import sync_playwright
-
-    # Inject ?print-pdf to trigger Reveal.js print mode
-    # We need to write the HTML to a temp file and add the print-pdf query
-
-    with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
-        # Modify the HTML to auto-enable print-pdf mode
-        modified = html_content.replace(
-            "Reveal.initialize({",
-            "Reveal.initialize({\n"
-            "      pdfSeparateFragments: false,\n"
-            "      pdfMaxPagesPerSlide: 1,",
-        )
-        f.write(modified)
-        tmp_path = f.name
-
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            # Load with print-pdf flag for Reveal.js
-            page.goto(f"file://{tmp_path}?print-pdf", wait_until="networkidle")
-            # Wait for Reveal.js to initialize
-            page.wait_for_timeout(2000)
-            pdf_bytes = page.pdf(
-                format="A4",
-                landscape=True,
-                print_background=True,
-            )
-            browser.close()
-        return pdf_bytes
-    finally:
-        import os
-        os.unlink(tmp_path)
 
 
 def _render_revealjs(title: str, slides: list[dict], author: str = "") -> str:

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from mistralai import Mistral
+from starlette.websockets import WebSocketState
 
 from ensemble.agents.registry import AgentRegistry
 from ensemble.api import routes
 from ensemble.api.ws import handle_conversation_ws
 from ensemble.config import settings
 from ensemble.conversations.manager import ConversationManager
+from ensemble.events import event_bus
 from ensemble.oracle.engine import OracleEngine
 
 logging.basicConfig(
@@ -47,7 +50,35 @@ async def lifespan(app: FastAPI):
     app.state.oracle = oracle
     app.state.mistral_client = client
 
+    # Optionally start Discord bot as a background task
+    discord_task = None
+    if settings.discord_bot_token and settings.discord_guild_id:
+        try:
+            from ensemble.discord_bot import CirclesBot, register_commands
+
+            discord_bot = CirclesBot(
+                registry=registry,
+                oracle=oracle,
+                mistral_client=client,
+                guild_id=int(settings.discord_guild_id),
+            )
+            register_commands(discord_bot)
+            discord_task = asyncio.create_task(
+                discord_bot.start(settings.discord_bot_token)
+            )
+            logger.info("Discord bot starting...")
+        except Exception:
+            logger.exception("Failed to start Discord bot")
+
     yield
+
+    # Cleanup Discord bot
+    if discord_task and not discord_task.done():
+        discord_task.cancel()
+        try:
+            await discord_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     # Cleanup
     await registry.cleanup_mistral()
@@ -76,6 +107,24 @@ async def conversation_websocket(ws: WebSocket, conversation_id: str):
         oracle=app.state.oracle,
         mistral_client=app.state.mistral_client,
     )
+
+
+@app.websocket("/ws/events")
+async def events_websocket(ws: WebSocket):
+    """Stream all system events to observability dashboard clients."""
+    await ws.accept()
+    q = event_bus.subscribe()
+    try:
+        while True:
+            event = await q.get()
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.send_json(event.to_dict())
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Events WS error")
+    finally:
+        event_bus.unsubscribe(q)
 
 
 @app.get("/health")

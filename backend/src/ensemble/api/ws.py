@@ -46,6 +46,7 @@ from ensemble.conversations.models import (
     Message,
     MessageRole,
 )
+from ensemble.events import SystemEvent, event_bus
 from ensemble.oracle.engine import OracleEngine
 from ensemble.utils import build_inputs, build_voice_inputs, extract_reply, extract_text_from_content
 
@@ -824,6 +825,20 @@ async def _handle_group_streaming(
     mistral_client: Any,
 ) -> None:
     """Handle group conversation using Mistral native handoffs with streaming."""
+    conv_id = conv.id
+    source_label = f"conv-{conv_id[:8]}"
+
+    def _emit(etype: str, edata: dict | None = None) -> None:
+        event_bus.emit(SystemEvent(
+            type=etype,
+            conversation_id=conv_id,
+            source="web",
+            source_label=source_label,
+            data=edata or {},
+        ))
+
+    _emit("user_message", {"content": content})
+
     try:
         msg_ids: dict[str, str] = {}  # agent_id -> current message_id
 
@@ -831,6 +846,7 @@ async def _handle_group_streaming(
             conv, content, attachments or None
         ):
             if event_type == "oracle_start":
+                _emit("oracle_start", data)
                 await _send(ws, {
                     "type": "oracle_start",
                     "directed": data.get("directed", False),
@@ -839,15 +855,18 @@ async def _handle_group_streaming(
                 })
 
             elif event_type == "oracle_end":
+                _emit("oracle_end", data)
                 await _send(ws, {"type": "oracle_end"})
 
             elif event_type == "topic_set":
+                _emit("topic_set", data)
                 await _send(ws, {
                     "type": "topic_set",
                     "topic": data.get("topic", ""),
                 })
 
             elif event_type == "oracle":
+                _emit("oracle", data)
                 await _send(ws, {
                     "type": "oracle_reasoning",
                     "reasoning": data.get("reasoning", ""),
@@ -857,6 +876,7 @@ async def _handle_group_streaming(
                 })
 
             elif event_type == "turn_change":
+                _emit("turn_change", data)
                 agent_id = data.get("agent_id")
                 msg_ids[agent_id] = _uuid.uuid4().hex[:12]
                 await _send(ws, {
@@ -866,6 +886,7 @@ async def _handle_group_streaming(
                 })
 
             elif event_type == "chunk":
+                # Skip emitting chunks to dashboard (too frequent)
                 agent_id = data.get("agent_id")
                 await _send(ws, {
                     "type": "message_chunk",
@@ -876,8 +897,11 @@ async def _handle_group_streaming(
 
             elif event_type == "message":
                 msg = data  # This is a Message object
-                # Use the Message's own ID so reply_to_id references
-                # from subsequent agents resolve correctly on the frontend.
+                _emit("message", {
+                    "agent_id": msg.agent_id,
+                    "content": msg.content,
+                    "reply_to_id": msg.reply_to_id,
+                })
                 await _send(ws, {
                     "type": "message_complete",
                     "message": {
@@ -891,6 +915,7 @@ async def _handle_group_streaming(
                 })
 
             elif event_type == "grader":
+                _emit("grader", data)
                 await _send(ws, {
                     "type": "grader",
                     "reasoning": data.get("reasoning", ""),
@@ -899,6 +924,7 @@ async def _handle_group_streaming(
                 })
 
             elif event_type == "agent_verdict":
+                _emit("agent_verdict", data)
                 await _send(ws, {
                     "type": "agent_verdict",
                     "agent_id": data.get("agent_id", ""),
@@ -907,10 +933,18 @@ async def _handle_group_streaming(
                 })
 
             elif event_type == "summary":
+                _emit("summary", data)
                 await _send(ws, {
                     "type": "summary",
                     "content": data.get("content", ""),
                 })
+
+            elif event_type in ("chunk", "message_partial", "agent_cancel"):
+                pass  # Too frequent / internal — skip dashboard
+
+            else:
+                if isinstance(data, dict):
+                    _emit(event_type, data)
 
     except asyncio.CancelledError:
         logger.info("Group round interrupted by new user message")

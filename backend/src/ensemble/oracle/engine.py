@@ -22,6 +22,7 @@ from mistralai import Mistral
 
 from ensemble.agents.registry import AgentRegistry
 from ensemble.config import settings
+
 from ensemble.conversations.models import (
     Attachment,
     Conversation,
@@ -29,7 +30,7 @@ from ensemble.conversations.models import (
     MessageRole,
 )
 from ensemble.oracle.turn_logger import RoundRecord, TurnRecord, log_turn
-from ensemble.utils import extract_text_from_content
+from ensemble.utils import extract_reply, extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ def _parse_json(text: str) -> dict:
 
 
 MAX_CONTEXT_MESSAGES = 15
-MAX_ROUNDS = 10
+MAX_ROUNDS = 5
 PASS_TOKEN = "[PASS]"
 PASS_VARIANTS = {"[pass]", "pass", "[pass].", "pass."}
 
@@ -937,6 +938,7 @@ class OracleEngine:
                 # Retry loop for Mistral 409 Conflict (conversation lock)
                 max_retries = 3
                 stream = None
+                func_calls = []
                 for attempt in range(max_retries):
                     try:
                         if mistral_conv_id:
@@ -945,6 +947,7 @@ class OracleEngine:
                                 .append_stream_async(
                                     conversation_id=mistral_conv_id,
                                     inputs=agent_inputs,
+                                    handoff_execution="client",
                                 )
                             )
                         else:
@@ -953,6 +956,7 @@ class OracleEngine:
                                 .start_stream_async(
                                     agent_id=agent.mistral_agent_id,
                                     inputs=agent_inputs,
+                                    handoff_execution="client",
                                 )
                             )
                         break  # success — exit retry loop
@@ -979,6 +983,12 @@ class OracleEngine:
                         conversation.mistral_conversation_ids[aid] = (
                             data.conversation_id
                         )
+
+                    # Capture function call objects
+                    dtype = type(data).__name__
+                    if "FunctionCall" in dtype:
+                        func_calls.append(data)
+
                     if hasattr(data, "content"):
                         text = extract_text_from_content(
                             getattr(data, "content", "")
@@ -1060,6 +1070,23 @@ class OracleEngine:
                                                 )
                                                 was_interrupted = True
                                                 break
+
+                # Handle function calls (tool use) after streaming
+                if func_calls:
+                    tool_text = await self._execute_tool_calls(
+                        func_calls, conversation, aid
+                    )
+                    if tool_text:
+                        if full_text.strip():
+                            # Agent produced text AND called a tool — append result
+                            full_text += "\n\n" + tool_text
+                            yield (
+                                "chunk",
+                                {"agent_id": aid, "content": "\n\n" + tool_text},
+                            )
+                        else:
+                            full_text = tool_text
+                            buffered = [tool_text]
 
                 # Handle unflushed buffer
                 if not flushed:
@@ -1158,6 +1185,7 @@ class OracleEngine:
         # Retry loop for Mistral 409 Conflict (conversation lock)
         max_retries = 3
         stream = None
+        func_calls = []
         for attempt in range(max_retries):
             try:
                 if mistral_conv_id:
@@ -1165,6 +1193,7 @@ class OracleEngine:
                         await self._client.beta.conversations.append_stream_async(
                             conversation_id=mistral_conv_id,
                             inputs=agent_inputs,
+                            handoff_execution="client",
                         )
                     )
                 else:
@@ -1172,6 +1201,7 @@ class OracleEngine:
                         await self._client.beta.conversations.start_stream_async(
                             agent_id=agent.mistral_agent_id,
                             inputs=agent_inputs,
+                            handoff_execution="client",
                         )
                     )
                 break  # success — exit retry loop
@@ -1195,6 +1225,12 @@ class OracleEngine:
                 conversation.mistral_conversation_ids[agent_id] = (
                     data.conversation_id
                 )
+
+            # Capture function call objects
+            dtype = type(data).__name__
+            if "FunctionCall" in dtype:
+                func_calls.append(data)
+
             if hasattr(data, "content"):
                 text = extract_text_from_content(
                     getattr(data, "content", "")
@@ -1234,6 +1270,22 @@ class OracleEngine:
                             "chunk",
                             {"agent_id": agent_id, "content": text},
                         ))
+
+        # Handle function calls (tool use) after streaming
+        if func_calls:
+            tool_text = await self._execute_tool_calls(
+                func_calls, conversation, agent_id
+            )
+            if tool_text:
+                if full_text.strip():
+                    full_text += "\n\n" + tool_text
+                    await queue.put((
+                        "chunk",
+                        {"agent_id": agent_id, "content": "\n\n" + tool_text},
+                    ))
+                else:
+                    full_text = tool_text
+                    buffered = [tool_text]
 
         # Handle unflushed
         if not flushed:
@@ -1293,6 +1345,7 @@ class OracleEngine:
             # Retry loop for Mistral 409 Conflict (conversation lock)
             max_retries = 3
             stream = None
+            func_calls = []
             for attempt in range(max_retries):
                 try:
                     if mistral_conv_id:
@@ -1301,6 +1354,7 @@ class OracleEngine:
                             .append_stream_async(
                                 conversation_id=mistral_conv_id,
                                 inputs=agent_inputs,
+                                handoff_execution="client",
                             )
                         )
                     else:
@@ -1309,6 +1363,7 @@ class OracleEngine:
                             .start_stream_async(
                                 agent_id=agent.mistral_agent_id,
                                 inputs=agent_inputs,
+                                handoff_execution="client",
                             )
                         )
                     break  # success — exit retry loop
@@ -1335,6 +1390,12 @@ class OracleEngine:
                     conversation.mistral_conversation_ids[agent_id] = (
                         data.conversation_id
                     )
+
+                # Capture function call objects
+                dtype = type(data).__name__
+                if "FunctionCall" in dtype:
+                    func_calls.append(data)
+
                 if hasattr(data, "content"):
                     text = extract_text_from_content(
                         getattr(data, "content", "")
@@ -1365,6 +1426,22 @@ class OracleEngine:
                                 "content": text,
                             })
 
+            # Handle function calls (tool use) after streaming
+            if func_calls:
+                tool_text = await self._execute_tool_calls(
+                    func_calls, conversation, agent_id
+                )
+                if tool_text:
+                    if full_text.strip():
+                        full_text += "\n\n" + tool_text
+                        yield ("chunk", {
+                            "agent_id": agent_id,
+                            "content": "\n\n" + tool_text,
+                        })
+                    else:
+                        full_text = tool_text
+                        buffered = [tool_text]
+
             # Handle unflushed buffer
             if not flushed and full_text:
                 target, cleaned = _parse_reply_target(
@@ -1393,6 +1470,95 @@ class OracleEngine:
 
         except Exception:
             logger.exception("Agent %s streaming failed", agent_id)
+
+    # ── Tool execution ─────────────────────────────────────────────────
+
+    async def _execute_tool_calls(
+        self,
+        func_call_deltas: list,
+        conversation: Conversation,
+        agent_id: str,
+    ) -> str:
+        """Execute function calls captured as streaming deltas.
+
+        Streaming events are `function.call.delta` — argument strings come in
+        chunks across many events with the same tool_call_id. We accumulate
+        them, parse the final JSON, execute the tool, and submit results.
+        """
+        from mistralai.models.functionresultentry import FunctionResultEntry
+        from ensemble.conversations.manager import TOOL_HANDLERS
+
+        mistral_cid = conversation.mistral_conversation_ids.get(agent_id)
+        if not mistral_cid:
+            return ""
+
+        # Accumulate deltas by tool_call_id
+        accumulated: dict[str, dict] = {}  # tool_call_id -> {name, args_str}
+        for fc in func_call_deltas:
+            tcid = getattr(fc, "tool_call_id", None)
+            if not tcid:
+                continue
+            if tcid not in accumulated:
+                accumulated[tcid] = {
+                    "name": getattr(fc, "name", ""),
+                    "args": "",
+                }
+            name = getattr(fc, "name", "")
+            if name:
+                accumulated[tcid]["name"] = name
+            accumulated[tcid]["args"] += getattr(fc, "arguments", "") or ""
+
+        if not accumulated:
+            return ""
+
+        logger.info(
+            "Function calls detected for agent %s: %s",
+            agent_id,
+            [v["name"] for v in accumulated.values()],
+        )
+
+        # Execute each accumulated function call
+        results = []
+        for tcid, info in accumulated.items():
+            fn_name = info["name"]
+            args_str = info["args"]
+            try:
+                args = json.loads(args_str) if args_str.strip() else {}
+                handler = TOOL_HANDLERS.get(fn_name)
+                if handler:
+                    logger.info("Executing tool %s for agent %s", fn_name, agent_id)
+                    result = await asyncio.to_thread(handler, **args)
+                    result_str = json.dumps(result)
+                    logger.info("Tool %s returned: %s", fn_name, result_str[:200])
+                else:
+                    result_str = json.dumps({"error": f"Unknown tool: {fn_name}"})
+                    logger.warning("Unknown tool: %s", fn_name)
+            except Exception:
+                logger.exception("Tool %s execution failed", fn_name)
+                result_str = json.dumps({"error": f"Tool {fn_name} failed"})
+
+            results.append(FunctionResultEntry(
+                tool_call_id=tcid,
+                result=result_str,
+            ))
+
+        if not results:
+            return ""
+
+        # Submit tool results back to Mistral
+        response = await self._client.beta.conversations.append_async(
+            conversation_id=mistral_cid,
+            inputs=results,
+        )
+        conversation.mistral_conversation_ids[agent_id] = response.conversation_id
+
+        # Handle chained tool calls (up to 2 more rounds)
+        from ensemble.conversations.manager import _handle_function_calls
+        response = await _handle_function_calls(
+            self._client, response, conversation, agent_id
+        )
+
+        return extract_reply(response, client=self._client) or ""
 
     # ── Summary ──────────────────────────────────────────────────────────
 

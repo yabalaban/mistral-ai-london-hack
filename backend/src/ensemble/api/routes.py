@@ -1,13 +1,57 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import uuid as _uuid
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ensemble.conversations.models import Attachment, ConversationType
+
+logger = logging.getLogger(__name__)
+
+# Agent profile JSON directory — same as main.py's PROFILES_DIR
+AGENTS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "agents"
+
+
+def _save_agent_json(profile) -> None:
+    """Write an agent profile to disk as JSON."""
+    data = {
+        "id": profile.id,
+        "name": profile.name,
+        "role": profile.role,
+        "bio": profile.bio,
+        "personality": profile.personality,
+        "instructions": profile.instructions,
+        "model": profile.model,
+        "tools": profile.tools,
+    }
+    if profile.voice_id:
+        data["voice_id"] = profile.voice_id
+    if profile.avatar_url:
+        data["avatar_url"] = profile.avatar_url
+
+    path = AGENTS_DIR / f"{profile.id}.json"
+    try:
+        path.write_text(json.dumps(data, indent=4) + "\n")
+        logger.info("Saved agent profile to %s", path)
+    except Exception:
+        logger.exception("Failed to save agent profile to %s", path)
+
+
+def _delete_agent_json(agent_id: str) -> None:
+    """Delete an agent's JSON file from disk."""
+    path = AGENTS_DIR / f"{agent_id}.json"
+    try:
+        if path.exists():
+            path.unlink()
+            logger.info("Deleted agent profile %s", path)
+    except Exception:
+        logger.exception("Failed to delete agent profile %s", path)
 
 router = APIRouter(prefix="/api")
 
@@ -43,6 +87,123 @@ async def get_agent(agent_id: str):
     return _agent_to_dict(agent)
 
 
+class CreateAgentRequest(BaseModel):
+    id: str | None = None
+    name: str
+    role: str
+    bio: str = ""
+    personality: str = ""
+    instructions: str = ""
+    model: str = "mistral-medium-latest"
+    tools: list[str] = []
+    voice_id: str = ""
+    avatar_url: str = ""
+
+
+@router.post("/agents")
+async def create_agent(req: CreateAgentRequest):
+    """Create a new agent dynamically and sync to Mistral."""
+    from ensemble.agents.models import AgentProfile
+
+    agent_id = req.id or req.name.lower().replace(" ", "_")
+
+    if _registry.get(agent_id):
+        raise HTTPException(409, f"Agent '{agent_id}' already exists")
+
+    profile = AgentProfile(
+        id=agent_id,
+        name=req.name,
+        role=req.role,
+        bio=req.bio or f"{req.name} is a {req.role}.",
+        personality=req.personality or "Helpful, knowledgeable, collaborative",
+        instructions=req.instructions,
+        model=req.model,
+        tools=req.tools,
+        voice_id=req.voice_id,
+        avatar_url=req.avatar_url,
+    )
+
+    _registry.add_agent(agent_id, profile)
+
+    # Persist to disk
+    _save_agent_json(profile)
+
+    # Sync to Mistral
+    try:
+        await _registry.sync_single_to_mistral(agent_id)
+    except Exception as e:
+        # If Mistral sync fails, try without — agent still usable
+        logger.warning("Failed to sync agent %s to Mistral: %s", agent_id, e)
+
+    return _agent_to_dict(profile)
+
+
+@router.delete("/agents/{agent_id}")
+async def delete_agent(agent_id: str):
+    """Remove an agent."""
+    agent = _registry.get(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    # Clean up Mistral agent
+    if agent.mistral_agent_id and _mistral_client:
+        try:
+            await _mistral_client.beta.agents.delete_async(agent_id=agent.mistral_agent_id)
+        except Exception:
+            pass
+
+    _registry.remove_agent(agent_id)
+
+    # Remove from disk
+    _delete_agent_json(agent_id)
+
+    return {"ok": True}
+
+
+class UpdateAgentRequest(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    bio: str | None = None
+    personality: str | None = None
+    instructions: str | None = None
+    model: str | None = None
+    tools: list[str] | None = None
+    voice_id: str | None = None
+    avatar_url: str | None = None
+
+
+@router.patch("/agents/{agent_id}")
+async def update_agent(agent_id: str, req: UpdateAgentRequest):
+    """Update an existing agent's properties."""
+    agent = _registry.get(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    if req.name is not None:
+        agent.name = req.name
+    if req.role is not None:
+        agent.role = req.role
+    if req.bio is not None:
+        agent.bio = req.bio
+    if req.personality is not None:
+        agent.personality = req.personality
+    if req.instructions is not None:
+        agent.instructions = req.instructions
+    if req.model is not None:
+        agent.model = req.model
+    if req.tools is not None:
+        agent.tools = req.tools
+    if req.voice_id is not None:
+        agent.voice_id = req.voice_id
+    if req.avatar_url is not None:
+        agent.avatar_url = req.avatar_url
+
+    # Persist changes to disk
+    _save_agent_json(agent)
+
+    return _agent_to_dict(agent)
+
+
 def _agent_to_dict(a) -> dict:
     return {
         "id": a.id,
@@ -50,6 +211,7 @@ def _agent_to_dict(a) -> dict:
         "role": a.role,
         "bio": a.bio,
         "personality": a.personality,
+        "model": a.model,
         "avatar": a.avatar_url,  # frontend expects "avatar"
         "avatar_url": a.avatar_url,
         "voice_id": a.voice_id,
@@ -239,19 +401,26 @@ async def get_slides(presentation_id: str):
     return Response(content=html_content, media_type="text/html")
 
 
-@router.get("/slides/{presentation_id}/pdf")
-async def get_slides_pdf(presentation_id: str):
-    """Download a generated presentation as PDF."""
-    from ensemble.tools.slides import get_pdf
 
-    pdf_bytes = get_pdf(presentation_id)
-    if not pdf_bytes:
-        raise HTTPException(404, "PDF not found")
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="slides-{presentation_id}.pdf"'},
-    )
+# ── Generated images ──────────────────────────────────────────────────────
+
+# In-memory store: image_id -> (bytes, content_type)
+_generated_images: dict[str, tuple[bytes, str]] = {}
+
+
+def store_generated_image(image_id: str, data: bytes, content_type: str = "image/png"):
+    """Store a generated image for serving."""
+    _generated_images[image_id] = (data, content_type)
+
+
+@router.get("/images/{image_id}")
+async def get_generated_image(image_id: str):
+    """Serve a generated image."""
+    entry = _generated_images.get(image_id)
+    if not entry:
+        raise HTTPException(404, "Image not found")
+    data, content_type = entry
+    return Response(content=data, media_type=content_type)
 
 
 # ── Voice ──────────────────────────────────────────────────────────────────

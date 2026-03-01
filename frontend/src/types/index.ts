@@ -5,6 +5,8 @@ export interface Agent {
   bio: string
   avatar: string
   personality: string
+  instructions?: string
+  model?: string
   voice_id?: string
   tools?: string[]
 }
