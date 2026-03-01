@@ -122,8 +122,8 @@ class ConversationManager:
             self._client, response, conv, agent_id
         )
 
-        # Extract assistant reply
-        reply_text = extract_reply(response)
+        # Extract assistant reply (pass client for image downloads)
+        reply_text = extract_reply(response, client=self._client)
         agent_msg = Message(
             role=MessageRole.AGENT,
             agent_id=agent_id,

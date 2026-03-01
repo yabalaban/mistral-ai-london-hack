@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,7 +48,35 @@ async def lifespan(app: FastAPI):
     app.state.oracle = oracle
     app.state.mistral_client = client
 
+    # Optionally start Discord bot as a background task
+    discord_task = None
+    if settings.discord_bot_token and settings.discord_guild_id:
+        try:
+            from ensemble.discord_bot import CirclesBot, register_commands
+
+            discord_bot = CirclesBot(
+                registry=registry,
+                oracle=oracle,
+                mistral_client=client,
+                guild_id=int(settings.discord_guild_id),
+            )
+            register_commands(discord_bot)
+            discord_task = asyncio.create_task(
+                discord_bot.start(settings.discord_bot_token)
+            )
+            logger.info("Discord bot starting...")
+        except Exception:
+            logger.exception("Failed to start Discord bot")
+
     yield
+
+    # Cleanup Discord bot
+    if discord_task and not discord_task.done():
+        discord_task.cancel()
+        try:
+            await discord_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     # Cleanup
     await registry.cleanup_mistral()

@@ -13,6 +13,7 @@ interface AgentTemplate {
   role: string
   bio: string
   personality: string
+  instructions: string
   tools: string[]
 }
 
@@ -22,13 +23,15 @@ const templates: AgentTemplate[] = [
     role: 'Researcher',
     bio: 'Thorough researcher who digs deep into topics, synthesizes information from multiple sources, and presents clear findings.',
     personality: 'Curious, methodical, thorough',
-    tools: ['web_search', 'analysis'],
+    instructions: 'You are a thorough research assistant. When given a topic, search for relevant information, cross-reference multiple sources, and present clear, well-structured findings. Always cite your sources and flag any conflicting information. Ask clarifying questions when the research scope is ambiguous.',
+    tools: ['web_search'],
   },
   {
     name: 'Code Reviewer',
     role: 'Software Engineer',
     bio: 'Experienced engineer focused on code quality, security, and best practices. Reviews PRs with precision.',
     personality: 'Detail-oriented, constructive, pragmatic',
+    instructions: 'You are an experienced software engineer specializing in code review. Analyze code for bugs, security vulnerabilities, performance issues, and adherence to best practices. Provide constructive feedback with specific suggestions for improvement. Use the code interpreter to test and validate your suggestions when helpful.',
     tools: ['code_interpreter'],
   },
   {
@@ -36,6 +39,7 @@ const templates: AgentTemplate[] = [
     role: 'Content Creator',
     bio: 'Versatile writer who crafts compelling copy, stories, and marketing content with a keen eye for tone and audience.',
     personality: 'Creative, articulate, adaptable',
+    instructions: 'You are a versatile creative writer. Craft compelling content tailored to the target audience and desired tone. Whether writing marketing copy, stories, blog posts, or social media content, focus on clarity, engagement, and originality. Ask about the audience, tone, and goals before writing.',
     tools: ['web_search'],
   },
   {
@@ -43,7 +47,8 @@ const templates: AgentTemplate[] = [
     role: 'Analytics Expert',
     bio: 'Turns raw data into actionable insights. Expert in visualization, statistical analysis, and spotting trends.',
     personality: 'Analytical, precise, data-driven',
-    tools: ['code_interpreter', 'analysis'],
+    instructions: 'You are a data analyst expert. Help users understand their data by performing statistical analysis, identifying trends, and creating clear visualizations. Use the code interpreter to write and run analysis code. Present findings in an accessible way with actionable recommendations.',
+    tools: ['code_interpreter'],
   },
 ]
 
@@ -54,6 +59,7 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
   const [role, setRole] = useState('')
   const [bio, setBio] = useState('')
   const [personality, setPersonality] = useState('')
+  const [instructions, setInstructions] = useState('')
 
   const selectTemplate = (t: AgentTemplate) => {
     setSelected(t)
@@ -61,6 +67,7 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
     setRole(t.role)
     setBio(t.bio)
     setPersonality(t.personality)
+    setInstructions(t.instructions)
     setStep('customize')
   }
 
@@ -73,6 +80,7 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
       bio: bio.trim(),
       avatar: '',
       personality: personality.trim(),
+      instructions: instructions.trim(),
       tools: selected?.tools ?? [],
     })
   }
@@ -178,6 +186,16 @@ export function CreateAgentModal({ onClose, onCreate }: CreateAgentModalProps) {
                 onInput={(e) => setPersonality((e.target as HTMLInputElement).value)}
                 class="w-full mt-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-zinc-900 text-sm outline-none focus:border-accent transition-colors"
                 placeholder="e.g. Curious, methodical"
+              />
+            </div>
+            <div>
+              <label class="text-xs font-medium text-zinc-400 uppercase tracking-wider">System Instructions</label>
+              <textarea
+                value={instructions}
+                onInput={(e) => setInstructions((e.target as HTMLTextAreaElement).value)}
+                rows={3}
+                class="w-full mt-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-zinc-900 text-sm outline-none focus:border-accent transition-colors resize-none"
+                placeholder="System prompt that drives agent behavior..."
               />
             </div>
             <div class="flex gap-2 pt-2">

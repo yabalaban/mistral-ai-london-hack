@@ -41,6 +41,14 @@ class AgentRegistry:
         """Look up an agent profile by ID, returning ``None`` if not found."""
         return self._agents.get(agent_id)
 
+    def add_agent(self, agent_id: str, profile: AgentProfile) -> None:
+        """Add an agent profile to the registry."""
+        self._agents[agent_id] = profile
+
+    def remove_agent(self, agent_id: str) -> None:
+        """Remove an agent profile from the registry."""
+        self._agents.pop(agent_id, None)
+
     def load_profiles(self, profiles_dir: Path) -> None:
         """Load agent profiles from JSON files in a directory."""
         if not profiles_dir.exists():
@@ -55,45 +63,11 @@ class AgentRegistry:
             except Exception:
                 logger.exception("Failed to load profile from %s", path)
 
-    async def sync_to_mistral(self) -> None:
-        """Create or update agents on Mistral platform."""
-        for agent_id, profile in self._agents.items():
-            if profile.mistral_agent_id:
-                continue
-            try:
-                # Map tool names to Mistral tool objects
-                tools = [
-                    BUILT_IN_TOOLS[t]
-                    for t in profile.tools
-                    if t in BUILT_IN_TOOLS
-                ] or None
-
-                full_instructions = (
-                    f"[Identity: {profile.name} — {profile.role}]\n"
-                    f"[Bio: {profile.bio}]\n"
-                    f"[Personality: {profile.personality}]\n\n"
-                    f"{profile.instructions}"
-                )
-
-                result = await self._client.beta.agents.create_async(
-                    model=profile.model,
-                    name=profile.name,
-                    instructions=full_instructions,
-                    description=profile.bio,
-                    tools=tools,
-                )
-                profile.mistral_agent_id = result.id
-                logger.info(
-                    "Created Mistral agent for %s: %s", agent_id, result.id
-                )
-            except Exception:
-                logger.exception("Failed to create Mistral agent for %s", agent_id)
-
-    async def sync_single_to_mistral(self, agent_id: str) -> None:
-        """Sync a single agent to Mistral."""
-        profile = self._agents.get(agent_id)
-        if not profile or profile.mistral_agent_id:
+    async def _sync_agent(self, agent_id: str, profile: AgentProfile) -> None:
+        """Create a single agent on Mistral platform (shared implementation)."""
+        if profile.mistral_agent_id:
             return
+        # Map tool names to Mistral tool objects
         tools = [
             BUILT_IN_TOOLS[t]
             for t in profile.tools
@@ -116,6 +90,21 @@ class AgentRegistry:
         )
         profile.mistral_agent_id = result.id
         logger.info("Created Mistral agent for %s: %s", agent_id, result.id)
+
+    async def sync_to_mistral(self) -> None:
+        """Create or update agents on Mistral platform."""
+        for agent_id, profile in self._agents.items():
+            try:
+                await self._sync_agent(agent_id, profile)
+            except Exception:
+                logger.exception("Failed to create Mistral agent for %s", agent_id)
+
+    async def sync_single_to_mistral(self, agent_id: str) -> None:
+        """Sync a single agent to Mistral."""
+        profile = self._agents.get(agent_id)
+        if not profile:
+            return
+        await self._sync_agent(agent_id, profile)
 
     async def cleanup_mistral(self) -> None:
         """Delete agents from Mistral platform on shutdown."""

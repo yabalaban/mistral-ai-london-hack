@@ -141,10 +141,13 @@ def create_slides(
     except Exception:
         logger.exception("PDF generation failed for %s", pres_id)
 
+    from ensemble.config import settings
+
+    base = settings.base_url.rstrip("/")
     return {
         "presentation_id": pres_id,
-        "url": f"/api/slides/{pres_id}",
-        "pdf_url": f"/api/slides/{pres_id}/pdf",
+        "url": f"{base}/api/slides/{pres_id}",
+        "pdf_url": f"{base}/api/slides/{pres_id}/pdf",
         "message": f"Presentation '{title}' created with {len(slides)} slides.",
     }
 

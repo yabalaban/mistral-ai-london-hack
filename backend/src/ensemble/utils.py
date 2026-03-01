@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def extract_reply(response: Any) -> str:
+def extract_reply(response: Any, *, client: Any = None) -> str:
     """Extract the text reply from a Mistral conversation response.
 
     Handles multiple content formats: plain string, list of content blocks,
@@ -17,24 +17,28 @@ def extract_reply(response: Any) -> str:
 
     Args:
         response: A Mistral conversation response object with an ``outputs`` list.
+        client: Optional Mistral client for downloading tool files (images).
 
     Returns:
         The extracted text content, or empty string if no text is found.
     """
     for output in response.outputs:
         if hasattr(output, "content") and hasattr(output, "role"):
-            return extract_text_from_content(output.content)
+            return extract_text_from_content(output.content, client=client)
     return ""
 
 
-def extract_text_from_content(content: Any) -> str:
+def extract_text_from_content(content: Any, *, client: Any = None) -> str:
     """Extract text from a Mistral content object.
 
     Handles plain strings, lists of content blocks (dicts or objects),
-    and objects with a ``text`` attribute.
+    and objects with a ``text`` attribute.  When *client* is provided,
+    ``tool_file`` blocks (e.g. from ``image_generation``) are downloaded,
+    stored locally, and rendered as markdown image links.
 
     Args:
         content: The content field from a Mistral output.
+        client: Optional Mistral client for downloading tool files.
 
     Returns:
         Extracted text string.
@@ -45,13 +49,47 @@ def extract_text_from_content(content: Any) -> str:
         texts = []
         for c in content:
             if isinstance(c, dict):
+                ctype = c.get("type", "")
+                if ctype == "tool_file" and c.get("file_id") and client:
+                    url = _download_tool_file(client, c["file_id"])
+                    if url:
+                        texts.append(f"\n\n![Generated image]({url})")
+                        continue
                 texts.append(c.get("text", ""))
+            elif hasattr(c, "type") and getattr(c, "type", "") == "tool_file":
+                file_id = getattr(c, "file_id", None)
+                if file_id and client:
+                    url = _download_tool_file(client, file_id)
+                    if url:
+                        texts.append(f"\n\n![Generated image]({url})")
+                        continue
             elif hasattr(c, "text"):
                 texts.append(getattr(c, "text", "") or "")
         return "".join(texts)
     if hasattr(content, "text"):
         return content.text or ""
     return str(content) if content else ""
+
+
+def _download_tool_file(client: Any, file_id: str) -> str | None:
+    """Download a Mistral tool file and store it locally for serving."""
+    import logging
+    import uuid as _uuid
+
+    from ensemble.config import settings
+
+    logger = logging.getLogger(__name__)
+    try:
+        file_bytes = client.files.download(file_id=file_id).read()
+        image_id = _uuid.uuid4().hex[:12]
+        from ensemble.api.routes import store_generated_image
+        store_generated_image(image_id, file_bytes, "image/png")
+        url = f"{settings.base_url}/api/images/{image_id}"
+        logger.info("Downloaded tool file %s → %s", file_id, url)
+        return url
+    except Exception:
+        logger.exception("Failed to download tool file %s", file_id)
+        return None
 
 
 VOICE_MODE_PREFIX = (

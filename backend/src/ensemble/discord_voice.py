@@ -10,9 +10,7 @@ from __future__ import annotations
 import asyncio
 import audioop
 import base64
-import io
 import logging
-import struct
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -99,6 +97,7 @@ class DiscordVoiceHandler:
         self._audio_queue: asyncio.Queue | None = None
         self._feed_task: asyncio.Task | None = None
         self._listen_task: asyncio.Task | None = None
+        self._response_task: asyncio.Task | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -190,7 +189,9 @@ class DiscordVoiceHandler:
                     if self._conv:
                         user_msg = Message(role=MessageRole.USER, content=text)
                         self._conv.messages.append(user_msg)
-                        asyncio.create_task(self._respond(text))
+                        if self._response_task and not self._response_task.done():
+                            self._response_task.cancel()
+                        self._response_task = asyncio.create_task(self._respond(text))
 
                 else:
                     # Partial transcript — could show typing indicator
@@ -258,7 +259,12 @@ class DiscordVoiceHandler:
                 if self._vc and self._vc.loop:
                     self._vc.loop.call_soon_threadsafe(done_event.set)
 
-            self._vc.play(source, after=after_play)
+            try:
+                self._vc.play(source, after=after_play)
+            except Exception:
+                logger.exception("play() raised for %s", agent.id)
+                Path(tmp.name).unlink(missing_ok=True)
+                return
             await done_event.wait()
 
     async def on_user_mute(self) -> None:

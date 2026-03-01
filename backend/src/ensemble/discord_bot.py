@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import discord
@@ -29,18 +30,92 @@ from ensemble.conversations.models import (
 )
 from ensemble.discord_voice import DiscordVoiceHandler
 from ensemble.oracle.engine import OracleEngine
-from ensemble.utils import build_inputs, extract_text_from_content
+from ensemble.conversations.manager import _handle_function_calls
+from ensemble.utils import build_inputs, extract_reply, extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
-# Agent avatar URLs — DiceBear pixel-art avatars as defaults
-AGENT_AVATARS = {
-    "emma": "https://api.dicebear.com/9.x/personas/png?seed=emma&size=256",
-    "sofia": "https://api.dicebear.com/9.x/personas/png?seed=sofia&size=256",
-    "dan": "https://api.dicebear.com/9.x/personas/png?seed=dan&size=256",
-    "marcus": "https://api.dicebear.com/9.x/personas/png?seed=marcus&size=256",
-    "kim": "https://api.dicebear.com/9.x/personas/png?seed=kim&size=256",
-}
+
+# ---------------------------------------------------------------------------
+# Message splitting for Discord's 2000-char limit
+# ---------------------------------------------------------------------------
+
+
+def _split_message(content: str, limit: int = 2000) -> list[str]:
+    """Split content into chunks that fit within Discord's character limit.
+
+    Tries to split at paragraph/newline boundaries first, then sentence/space
+    boundaries. Avoids splitting inside fenced code blocks when possible.
+    """
+    if len(content) <= limit:
+        return [content]
+
+    chunks: list[str] = []
+    while content:
+        if len(content) <= limit:
+            chunks.append(content)
+            break
+
+        # Check if we'd split inside an open code block
+        candidate = content[:limit]
+        fence_count = candidate.count("```")
+        if fence_count % 2 == 1:
+            # Odd number of fences = we're inside a code block.
+            # Try to find the closing fence and split after it.
+            close_idx = content.find("```", candidate.rfind("```") + 3)
+            if close_idx != -1 and close_idx + 3 <= limit * 2:
+                # Include the closing fence in this chunk
+                split_at = close_idx + 3
+                chunks.append(content[:split_at])
+                content = content[split_at:].lstrip("\n")
+                continue
+
+        # Find last newline before limit
+        split_at = content.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = content.rfind(" ", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(content[:split_at])
+        content = content[split_at:].lstrip("\n")
+
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Slides embed helper
+# ---------------------------------------------------------------------------
+
+_SLIDES_URL_RE = re.compile(r"(https?://[^\s]+/api/slides/([a-f0-9]+))(?:/pdf)?")
+
+
+def _build_slides_embed(content: str) -> discord.Embed | None:
+    """If content contains slide URLs, return a Discord embed linking to them."""
+    match = _SLIDES_URL_RE.search(content)
+    if not match:
+        return None
+
+    base_url = match.group(1)
+    # Ensure we get the base slide URL (without /pdf suffix)
+    if base_url.endswith("/pdf"):
+        base_url = base_url[: -len("/pdf")]
+    pdf_url = f"{base_url}/pdf"
+
+    embed = discord.Embed(
+        title="Presentation Created",
+        color=0x06B6D4,
+    )
+    embed.add_field(
+        name="View Slides",
+        value=f"[Open in browser]({base_url})",
+        inline=True,
+    )
+    embed.add_field(
+        name="Download PDF",
+        value=f"[Download]({pdf_url})",
+        inline=True,
+    )
+    return embed
 
 
 # ---------------------------------------------------------------------------
@@ -79,17 +154,31 @@ class WebhookManager:
         thread: discord.Thread | None = None,
     ) -> discord.WebhookMessage:
         wh = await self.get_webhook(channel, agent)
-        avatar = agent.avatar_url or AGENT_AVATARS.get(agent.id, "")
-        kwargs: dict[str, Any] = {
-            "content": content,
-            "username": f"{agent.name} • {agent.role}",
-            "wait": True,
-        }
-        if avatar:
-            kwargs["avatar_url"] = avatar
-        if thread:
-            kwargs["thread"] = thread
-        return await wh.send(**kwargs)
+        avatar = (
+            agent.avatar_url
+            or f"https://api.dicebear.com/9.x/personas/png?seed={agent.id}&size=256"
+        )
+
+        # Detect slide URLs and build an embed if present
+        slide_embed = _build_slides_embed(content)
+
+        chunks = _split_message(content)
+        last_msg = None
+        for i, chunk in enumerate(chunks):
+            kwargs: dict[str, Any] = {
+                "content": chunk,
+                "username": f"{agent.name} • {agent.role}",
+                "wait": True,
+            }
+            if avatar:
+                kwargs["avatar_url"] = avatar
+            if thread:
+                kwargs["thread"] = thread
+            # Attach the slides embed to the last chunk
+            if slide_embed and i == len(chunks) - 1:
+                kwargs["embeds"] = [slide_embed]
+            last_msg = await wh.send(**kwargs)
+        return last_msg
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +375,10 @@ class CirclesBot(discord.Bot):
                 if agent_id not in state.agent_threads:
                     try:
                         # Create a starter message for the thread
-                        avatar = agent.avatar_url or AGENT_AVATARS.get(agent.id, "")
+                        avatar = (
+                            agent.avatar_url
+                            or f"https://api.dicebear.com/9.x/personas/png?seed={agent.id}&size=256"
+                        )
                         embed = discord.Embed(
                             title=agent.name,
                             description=f"**{agent.role}**\n\n{agent.bio}",
@@ -449,6 +541,11 @@ class CirclesBot(discord.Bot):
                     if agent and msg.content:
                         await self.webhook_mgr.send_as_agent(channel, agent, msg.content)
 
+                elif event_type == "topic_set":
+                    topic = data.get("topic", "")
+                    if topic:
+                        conv.topic = topic
+
                 elif event_type == "summary":
                     summary = data.get("content", "")
                     if summary:
@@ -476,6 +573,7 @@ class CirclesBot(discord.Bot):
         inputs: str | list[dict],
     ) -> str:
         full_text = ""
+        has_function_call = False
         mistral_conv_id = conv.mistral_conversation_ids.get(agent_id)
 
         max_retries = 3
@@ -498,6 +596,12 @@ class CirclesBot(discord.Bot):
                     ev_data = event.data
                     if hasattr(ev_data, "conversation_id") and ev_data.conversation_id:
                         conv.mistral_conversation_ids[agent_id] = ev_data.conversation_id
+
+                    # Detect function calls
+                    dtype = type(ev_data).__name__
+                    if "FunctionCall" in dtype:
+                        has_function_call = True
+
                     if hasattr(ev_data, "content"):
                         text = extract_text_from_content(ev_data.content)
                         if text:
@@ -510,6 +614,24 @@ class CirclesBot(discord.Bot):
                 else:
                     logger.exception("Mistral streaming failed for %s", agent_id)
                     break
+
+        # If there was a function call, handle tool execution and get final response
+        if has_function_call:
+            mistral_conv_id = conv.mistral_conversation_ids.get(agent_id)
+            if mistral_conv_id:
+                try:
+                    response = await self.mistral_client.beta.conversations.append_async(
+                        conversation_id=mistral_conv_id,
+                        inputs="Please proceed with the tool call.",
+                    )
+                    response = await _handle_function_calls(
+                        self.mistral_client, response, conv, agent_id
+                    )
+                    tool_reply = extract_reply(response)
+                    if tool_reply:
+                        full_text = tool_reply
+                except Exception:
+                    logger.exception("Function call handling failed for %s", agent_id)
 
         return full_text
 
@@ -672,3 +794,79 @@ def register_commands(bot: CirclesBot) -> None:
             await ctx.respond("**Active agents:**\n" + "\n".join(lines))
         else:
             await ctx.respond("No agents in this channel. Use `/invite` to add some.")
+
+    @bot.slash_command(
+        name="create_agent",
+        description="Create a new AI agent with a custom personality",
+        guild_ids=guild_ids,
+    )
+    async def cmd_create_agent(
+        ctx: discord.ApplicationContext,
+        name: discord.Option(str, "Agent name"),
+        role: discord.Option(str, "Agent role (e.g. 'Data Scientist')"),
+        personality: discord.Option(
+            str, "Personality traits", required=False, default=""
+        ),
+        tools: discord.Option(
+            str,
+            "Comma-separated tools: create_slides, code_interpreter, web_search, image_generation",
+            required=False,
+            default="",
+        ),
+    ) -> None:
+        agent_id = name.lower().replace(" ", "_")
+        if bot.registry.get(agent_id):
+            await ctx.respond(f"Agent **{name}** already exists.")
+            return
+
+        tool_list = [t.strip() for t in tools.split(",") if t.strip()] if tools else []
+        profile = AgentProfile(
+            id=agent_id,
+            name=name,
+            role=role,
+            bio=f"{name} is a {role}.",
+            personality=personality or "Helpful, knowledgeable, collaborative",
+            instructions=(
+                f"You are {name}, a {role}. "
+                + (f"Your personality: {personality}. " if personality else "")
+                + "Be helpful and engage naturally in conversation."
+            ),
+            model="mistral-large-2512",
+            tools=tool_list,
+        )
+
+        bot.registry.add_agent(agent_id, profile)
+
+        # Persist to disk
+        from pathlib import Path
+        import json as _json
+
+        agents_dir = Path(__file__).resolve().parent.parent / "agents"
+        agents_dir.mkdir(exist_ok=True)
+        (agents_dir / f"{agent_id}.json").write_text(
+            _json.dumps(
+                {
+                    "id": agent_id,
+                    "name": name,
+                    "role": role,
+                    "bio": profile.bio,
+                    "personality": profile.personality,
+                    "instructions": profile.instructions,
+                    "model": profile.model,
+                    "tools": tool_list,
+                },
+                indent=2,
+            )
+        )
+
+        # Sync to Mistral
+        try:
+            await bot.registry.sync_single_to_mistral(agent_id)
+        except Exception as e:
+            logger.warning("Failed to sync agent %s to Mistral: %s", agent_id, e)
+
+        await ctx.respond(
+            f"Created agent **{name}** ({role})"
+            + (f" with tools: {', '.join(tool_list)}" if tool_list else "")
+            + f". Use `/invite {name}` to add them to this channel."
+        )

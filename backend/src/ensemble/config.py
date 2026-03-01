@@ -36,6 +36,15 @@ class Settings:
     elevenlabs_api_key: str = field(
         default_factory=lambda: os.environ.get("ELEVENLABS_API_KEY", "")
     )
+    discord_bot_token: str = field(
+        default_factory=lambda: os.environ.get("DISCORD_BOT_TOKEN", "")
+    )
+    discord_guild_id: str = field(
+        default_factory=lambda: os.environ.get("DISCORD_GUILD_ID", "")
+    )
+    base_url: str = field(
+        default_factory=lambda: os.environ.get("BASE_URL", "http://localhost:8000")
+    )
     host: str = "0.0.0.0"
     port: int = 8000
     default_model: str = "mistral-medium-latest"
