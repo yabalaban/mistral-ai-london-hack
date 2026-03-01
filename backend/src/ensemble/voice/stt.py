@@ -15,7 +15,7 @@ from ensemble.config import settings
 
 logger = logging.getLogger(__name__)
 
-STT_BATCH_MODEL = "mistral-stt-latest"
+STT_BATCH_MODEL = "voxtral-mini-latest"
 
 
 async def transcribe_audio(client: Mistral, audio_data: bytes, language: str = "en") -> str:
@@ -67,8 +67,9 @@ class RealtimeSTTSession:
         await session.close()
     """
 
-    def __init__(self, *, language: str = "en", on_commit: Any = None) -> None:
+    def __init__(self, *, language: str = "en", on_commit: Any = None, auto_commit: bool = False) -> None:
         self._language = language
+        self._auto_commit = auto_commit
         self._connection: Any = None
         self._queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
         self._closed = False
@@ -85,14 +86,15 @@ class RealtimeSTTSession:
 
         client = ElevenLabs(api_key=settings.elevenlabs_api_key)
 
-        logger.info("STT connecting via ElevenLabs SDK (manual commit, PCM 16kHz)")
+        strategy = CommitStrategy.VAD if self._auto_commit else CommitStrategy.MANUAL
+        logger.info("STT connecting via ElevenLabs SDK (%s commit, PCM 16kHz)", strategy)
         self._connection = await client.speech_to_text.realtime.connect(
             RealtimeAudioOptions(
                 model_id="scribe_v2_realtime",
                 language_code=self._language,
                 audio_format=AudioFormat.PCM_16000,
                 sample_rate=16000,
-                commit_strategy=CommitStrategy.MANUAL,
+                commit_strategy=strategy,
             )
         )
 
