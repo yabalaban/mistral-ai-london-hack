@@ -43,6 +43,86 @@ async def get_agent(agent_id: str):
     return _agent_to_dict(agent)
 
 
+class CreateAgentRequest(BaseModel):
+    name: str
+    role: str
+    bio: str = ""
+    personality: str = ""
+    tools: list[str] = []
+    voice_id: str = ""
+    avatar_url: str = ""
+
+
+@router.post("/agents")
+async def create_agent(req: CreateAgentRequest):
+    """Create a new agent dynamically and sync to Mistral."""
+    from ensemble.agents.models import AgentProfile
+
+    agent_id = req.name.lower().replace(" ", "_")
+
+    if _registry.get(agent_id):
+        raise HTTPException(409, f"Agent '{agent_id}' already exists")
+
+    profile = AgentProfile(
+        id=agent_id,
+        name=req.name,
+        role=req.role,
+        bio=req.bio or f"{req.name} is a {req.role}.",
+        personality=req.personality or "Helpful, knowledgeable, collaborative",
+        tools=req.tools,
+        voice_id=req.voice_id,
+        avatar_url=req.avatar_url,
+    )
+
+    _registry.agents[agent_id] = profile
+
+    # Sync to Mistral
+    try:
+        await _registry.sync_single_to_mistral(agent_id)
+    except Exception as e:
+        # If Mistral sync fails, try without — agent still usable
+        import logging
+        logging.getLogger(__name__).warning("Failed to sync agent %s to Mistral: %s", agent_id, e)
+
+    return _agent_to_dict(profile)
+
+
+@router.delete("/agents/{agent_id}")
+async def delete_agent(agent_id: str):
+    """Remove an agent."""
+    agent = _registry.get(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    # Clean up Mistral agent
+    if agent.mistral_agent_id and _mistral_client:
+        try:
+            await _mistral_client.agents.delete_async(agent_id=agent.mistral_agent_id)
+        except Exception:
+            pass
+
+    del _registry.agents[agent_id]
+    return {"ok": True}
+
+
+@router.patch("/agents/{agent_id}")
+async def update_agent(agent_id: str, req: CreateAgentRequest):
+    """Update an existing agent's properties."""
+    agent = _registry.get(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    agent.name = req.name or agent.name
+    agent.role = req.role or agent.role
+    agent.bio = req.bio or agent.bio
+    agent.personality = req.personality or agent.personality
+    agent.tools = req.tools if req.tools else agent.tools
+    agent.voice_id = req.voice_id or agent.voice_id
+    agent.avatar_url = req.avatar_url or agent.avatar_url
+
+    return _agent_to_dict(agent)
+
+
 def _agent_to_dict(a) -> dict:
     return {
         "id": a.id,

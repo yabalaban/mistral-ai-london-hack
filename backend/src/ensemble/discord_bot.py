@@ -184,7 +184,6 @@ class CirclesBot(discord.Bot):
                 return
 
             # Find a text channel to post transcriptions in
-            # Use the first text channel in the same category, or the guild's first text channel
             text_channel = None
             if after.channel.category:
                 for ch in after.channel.category.text_channels:
@@ -201,17 +200,28 @@ class CirclesBot(discord.Bot):
             try:
                 await self.voice_handler.join(after.channel, text_channel, state.conv)
                 await text_channel.send(
-                    f"🎙️ Joined **{after.channel.name}** — listening! "
-                    f"Speak naturally, agents will respond."
+                    f"🎙️ Joined **{after.channel.name}** — unmute to talk, mute to send!"
                 )
             except Exception:
                 logger.exception("Auto-join voice failed")
+            return
+
+        # User muted — commit STT (acts as "send" / PTT release)
+        if after.channel and not before.self_mute and after.self_mute:
+            logger.info("User %s muted — committing STT", member)
+            await self.voice_handler.on_user_mute()
+            return
+
+        # User unmuted — resume listening
+        if after.channel and before.self_mute and not after.self_mute:
+            logger.info("User %s unmuted — resuming listening", member)
+            await self.voice_handler.on_user_unmute()
+            return
 
         # User left a voice channel — check if bot should leave
         if before.channel and (before.channel != after.channel):
             if not self.voice_handler.is_connected:
                 return
-            # Count non-bot members still in the channel
             if self.voice_handler._vc and self.voice_handler._vc.channel == before.channel:
                 humans = [m for m in before.channel.members if not m.bot]
                 if not humans:

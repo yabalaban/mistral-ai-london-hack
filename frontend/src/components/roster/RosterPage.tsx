@@ -8,6 +8,7 @@ import { Spinner } from '../shared/Spinner.tsx'
 import { Button } from '../shared/Button.tsx'
 import type { Agent } from '../../types/index.ts'
 import { createGroupConversation } from '../../utils/conversations.ts'
+import { createAgent } from '../../api/client.ts'
 
 interface RosterPageProps {
   path?: string
@@ -17,8 +18,15 @@ export function RosterPage(_props: RosterPageProps) {
   const [showCreateAgent, setShowCreateAgent] = useState(false)
   const [showNewGroup, setShowNewGroup] = useState(false)
 
-  const handleCreateAgent = (agent: Agent) => {
-    agents.value = [...agents.value, agent]
+  const handleCreateAgent = async (agent: Agent) => {
+    try {
+      const created = await createAgent(agent)
+      agents.value = [...agents.value, created]
+    } catch (e) {
+      console.error('Failed to create agent:', e)
+      // Fallback: add locally
+      agents.value = [...agents.value, agent]
+    }
     setShowCreateAgent(false)
   }
 

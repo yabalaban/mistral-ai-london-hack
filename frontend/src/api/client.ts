@@ -31,6 +31,24 @@ export function fetchAgents(): Promise<Agent[]> {
   return request('/agents')
 }
 
+export function createAgent(agent: Omit<Agent, 'id'>): Promise<Agent> {
+  return request('/agents', {
+    method: 'POST',
+    body: JSON.stringify(agent),
+  })
+}
+
+export function deleteAgent(agentId: string): Promise<void> {
+  return request(`/agents/${agentId}`, { method: 'DELETE' })
+}
+
+export function updateAgent(agentId: string, updates: Partial<Agent>): Promise<Agent> {
+  return request(`/agents/${agentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(updates),
+  })
+}
+
 export function fetchConversation(id: string): Promise<Conversation> {
   return request(`/conversations/${id}`)
 }

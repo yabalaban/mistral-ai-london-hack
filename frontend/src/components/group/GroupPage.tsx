@@ -11,6 +11,7 @@ import { GroupMessages } from './GroupMessages.tsx'
 import { CallControls } from './CallControls.tsx'
 import { ChatInput } from '../chat/ChatInput.tsx'
 import { MessageList } from '../chat/MessageList.tsx'
+import { OracleMonitor } from '../oracle/OracleMonitor.tsx'
 import { Spinner } from '../shared/Spinner.tsx'
 import { generateId } from '../../utils/format.ts'
 import { USE_MOCKS } from '../../config.ts'
@@ -160,7 +161,9 @@ export function GroupPage({ id }: GroupPageProps) {
             />
           )}
         </div>
-        <div class="hidden md:flex"><GroupMessages /></div>
+        <div class="hidden lg:flex flex-col w-80 border-l border-zinc-200 bg-white/50">
+          <OracleMonitor />
+        </div>
       </div>
     </>
   )

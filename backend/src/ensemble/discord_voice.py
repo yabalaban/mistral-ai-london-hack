@@ -123,8 +123,8 @@ class DiscordVoiceHandler:
         loop = asyncio.get_event_loop()
         sink = _make_streaming_sink(self._audio_queue, loop)
 
-        # Start ElevenLabs realtime STT with AUTO commit (no PTT in Discord)
-        self._stt_session = RealtimeSTTSession(auto_commit=True)
+        # Start ElevenLabs realtime STT with MANUAL commit (mute = commit)
+        self._stt_session = RealtimeSTTSession(auto_commit=False)
         await self._stt_session.connect()
 
         # Start recording with our streaming sink
@@ -260,6 +260,22 @@ class DiscordVoiceHandler:
 
             self._vc.play(source, after=after_play)
             await done_event.wait()
+
+    async def on_user_mute(self) -> None:
+        """User muted — commit STT to finalize transcript."""
+        if self._stt_session and not self._stt_session._closed:
+            logger.info("Committing STT (user muted)")
+            await self._stt_session.commit()
+
+    async def on_user_unmute(self) -> None:
+        """User unmuted — reconnect STT if connection was closed."""
+        if self._stt_session and self._stt_session._closed:
+            logger.info("Reconnecting STT (user unmuted)")
+            self._stt_session = RealtimeSTTSession(auto_commit=False)
+            await self._stt_session.connect()
+            # Restart the transcript listener
+            if self._listen_task and self._listen_task.done():
+                self._listen_task = asyncio.create_task(self._listen_transcripts())
 
     async def leave(self) -> None:
         self._active = False

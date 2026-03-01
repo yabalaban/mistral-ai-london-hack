@@ -89,6 +89,34 @@ class AgentRegistry:
             except Exception:
                 logger.exception("Failed to create Mistral agent for %s", agent_id)
 
+    async def sync_single_to_mistral(self, agent_id: str) -> None:
+        """Sync a single agent to Mistral."""
+        profile = self._agents.get(agent_id)
+        if not profile or profile.mistral_agent_id:
+            return
+        tools = [
+            BUILT_IN_TOOLS[t]
+            for t in profile.tools
+            if t in BUILT_IN_TOOLS
+        ] or None
+
+        full_instructions = (
+            f"[Identity: {profile.name} — {profile.role}]\n"
+            f"[Bio: {profile.bio}]\n"
+            f"[Personality: {profile.personality}]\n\n"
+            f"{profile.instructions}"
+        )
+
+        result = await self._client.beta.agents.create_async(
+            model=profile.model,
+            name=profile.name,
+            instructions=full_instructions,
+            description=profile.bio,
+            tools=tools,
+        )
+        profile.mistral_agent_id = result.id
+        logger.info("Created Mistral agent for %s: %s", agent_id, result.id)
+
     async def cleanup_mistral(self) -> None:
         """Delete agents from Mistral platform on shutdown."""
         for agent_id, profile in self._agents.items():
