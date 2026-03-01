@@ -307,11 +307,9 @@ class CirclesBot(discord.Bot):
             member, before.channel, before.self_mute, after.channel, after.self_mute,
         )
 
-        # User joined a voice channel
+        # User joined a voice channel (or switched channels)
         if after.channel and (before.channel != after.channel):
-            # Check if bot is already in this channel
-            if self.voice_handler.is_connected:
-                return
+            # join() handles move_to() if already connected — no manual leave needed
 
             # Find matching text channel by exact name
             voice_name = after.channel.name.lower().strip()

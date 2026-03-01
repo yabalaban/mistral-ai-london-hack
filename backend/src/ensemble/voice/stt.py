@@ -85,6 +85,7 @@ class RealtimeSTTSession:
             raise RuntimeError("ELEVENLABS_API_KEY not set")
 
         client = ElevenLabs(api_key=settings.elevenlabs_api_key)
+        self._audio_chunk_count = 0
 
         strategy = CommitStrategy.VAD if self._auto_commit else CommitStrategy.MANUAL
         logger.info("STT connecting via ElevenLabs SDK (%s commit, PCM 16kHz)", strategy)
@@ -149,8 +150,11 @@ class RealtimeSTTSession:
         """Force-commit the current audio segment (call on PTT release)."""
         if self._connection is None or self._closed:
             return
+        if self._audio_chunk_count == 0:
+            logger.info("STT commit skipped — no audio sent yet")
+            return
         try:
-            logger.info("STT committing (PTT release)")
+            logger.info("STT committing (PTT release, %d chunks sent)", self._audio_chunk_count)
             await self._connection.commit()
         except Exception:
             logger.exception("Failed to commit STT")

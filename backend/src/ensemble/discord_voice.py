@@ -12,6 +12,7 @@ import audioop
 import base64
 import logging
 import os
+import re
 from typing import Any
 
 import discord
@@ -30,6 +31,21 @@ from ensemble.voice.stt import RealtimeSTTSession
 from ensemble.voice.tts import DEFAULT_MODEL, DEFAULT_VOICE_ID
 
 logger = logging.getLogger(__name__)
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _tts_text_for(content: str) -> str:
+    """If a message contains URLs/attachments, strip them and add a hint."""
+    urls = _URL_RE.findall(content)
+    if not urls:
+        return content
+    # Remove URLs from text, keep the spoken part
+    spoken = _URL_RE.sub("", content).strip()
+    hint = "Check the text chat for the link."
+    if spoken:
+        return f"{spoken} {hint}"
+    return hint
 
 
 def _resample_48k_stereo_to_16k_mono(pcm_48k_stereo: bytes) -> bytes:
@@ -111,12 +127,45 @@ class DiscordVoiceHandler:
     ) -> None:
         logger.info("Voice join requested: channel=%s, text_channel=%s", voice_channel.name, text_channel.name)
 
-        if self._vc and self._vc.is_connected():
-            logger.info("Disconnecting from previous voice channel")
-            await self._vc.disconnect(force=True)
+        # Clean up previous session (tasks, STT, recording)
+        self._active = False
+        if self._feed_task and not self._feed_task.done():
+            self._feed_task.cancel()
+            try:
+                await self._feed_task
+            except asyncio.CancelledError:
+                pass
+        if self._listen_task and not self._listen_task.done():
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
+        if self._stt_session:
+            await self._stt_session.close()
+            self._stt_session = None
+
+        # Force-clear any stale voice client from py-cord's internal state
+        guild = voice_channel.guild
+        existing_vc = guild.voice_client
+        if existing_vc:
+            logger.info("Cleaning up stale voice client")
+            try:
+                if existing_vc.recording:
+                    existing_vc.stop_recording()
+            except Exception:
+                pass
+            try:
+                await existing_vc.disconnect(force=True)
+            except Exception:
+                pass
+            # Force-remove from py-cord internal state
+            existing_vc.cleanup()
+            await asyncio.sleep(1)
 
         self._vc = await voice_channel.connect()
         logger.info("Voice connected to #%s", voice_channel.name)
+
         self._text_channel = text_channel
         self._conv = conv
         self._active = True
@@ -224,10 +273,11 @@ class DiscordVoiceHandler:
 
                     logger.info("Final transcript: %r", text)
 
-                    # Post transcription in text channel (silent — no push notification)
-                    if self._text_channel:
+                    # Post transcription in voice channel text chat
+                    vc_channel = self._vc.channel if self._vc else None
+                    if vc_channel:
                         try:
-                            await self._text_channel.send(f"🎤 {text}", silent=True)
+                            await vc_channel.send(f"🎤 {text}", silent=True)
                         except discord.HTTPException:
                             pass
 
@@ -305,30 +355,23 @@ class DiscordVoiceHandler:
                     })
                     agent = self.registry.get(msg.agent_id)
                     if agent and msg.content:
-                        # Post to linked text channel
-                        if self._text_channel:
+                        # Post full message to voice channel text chat
+                        vc_channel = voice_channel or (self._vc.channel if self._vc else None)
+                        if vc_channel:
                             try:
                                 await self.webhook_mgr.send_as_agent(
-                                    self._text_channel, agent, msg.content
-                                )
-                            except Exception:
-                                logger.exception("Failed to send text for %s", msg.agent_id)
-
-                        # Post to voice channel text chat (if text-initiated)
-                        if voice_channel:
-                            try:
-                                await self.webhook_mgr.send_as_agent(
-                                    voice_channel, agent, msg.content
+                                    vc_channel, agent, msg.content
                                 )
                             except Exception:
                                 logger.warning("Webhook failed for voice channel, using plain send")
                                 try:
-                                    await voice_channel.send(f"**{agent.name}**: {msg.content}")
+                                    await vc_channel.send(f"**{agent.name}**: {msg.content}")
                                 except Exception:
                                     logger.exception("Failed to send to voice channel")
 
-                        # Queue TTS (don't block oracle loop)
-                        asyncio.create_task(self._play_agent_tts(agent, msg.content))
+                        # Queue TTS — use short phrase if message has attachments/URLs
+                        tts_text = _tts_text_for(msg.content)
+                        asyncio.create_task(self._play_agent_tts(agent, tts_text))
 
                 elif event_type == "grader":
                     logger.info("  grader: done=%s", data.get("done"))
@@ -342,6 +385,18 @@ class DiscordVoiceHandler:
 
                 elif event_type == "summary":
                     _emit("summary", data)
+                    # Post summary to linked text channel
+                    summary_text = data.get("content", "")
+                    if summary_text and self._text_channel:
+                        try:
+                            embed = discord.Embed(
+                                title="Voice Round Summary",
+                                description=summary_text,
+                                color=0x8B5CF6,
+                            )
+                            await self._text_channel.send(embed=embed)
+                        except Exception:
+                            logger.exception("Failed to send summary to text channel")
 
                 elif event_type in ("chunk", "message_partial", "agent_cancel"):
                     pass
@@ -485,9 +540,13 @@ class DiscordVoiceHandler:
                     self._vc.stop_recording()
                 except Exception:
                     logger.exception("  Failed to stop recording")
-            if self._vc.is_connected():
-                logger.info("  Disconnecting voice client")
+            logger.info("  Disconnecting voice client")
+            try:
                 await self._vc.disconnect(force=True)
+            except Exception:
+                pass
+            # Force-remove from py-cord internal state
+            self._vc.cleanup()
             self._vc = None
 
         logger.info("Voice leave: cleanup complete")
