@@ -13,8 +13,10 @@ Uses py-cord for Sink/voice recording support.
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import discord
@@ -209,10 +211,45 @@ class ChannelState:
 
 _channels: dict[int, ChannelState] = {}
 
+_CHANNELS_FILE = Path(__file__).resolve().parent.parent.parent / "channel_agents.json"
 
-def _get_state(channel_id: int, default_agents: list[str]) -> ChannelState:
+
+def _load_channel_agents() -> dict[str, list[str]]:
+    """Load channel→agent_ids mapping from disk."""
+    if _CHANNELS_FILE.exists():
+        try:
+            return _json.loads(_CHANNELS_FILE.read_text())
+        except Exception:
+            logger.warning("Failed to load %s, starting fresh", _CHANNELS_FILE)
+    return {}
+
+
+def _save_channel_agents() -> None:
+    """Persist current channel→agent_ids mapping to disk."""
+    data: dict[str, list[str]] = {}
+    for ch_id, state in _channels.items():
+        if state.agent_ids:  # only persist non-empty channels
+            data[str(ch_id)] = state.agent_ids
+    try:
+        _CHANNELS_FILE.write_text(_json.dumps(data, indent=2))
+    except Exception:
+        logger.exception("Failed to save channel agents")
+
+
+# Load persisted mappings on module import
+_persisted = _load_channel_agents()
+for _ch_str, _agent_list in _persisted.items():
+    try:
+        _channels[int(_ch_str)] = ChannelState(_agent_list)
+    except (ValueError, TypeError):
+        pass
+if _persisted:
+    logger.info("Loaded channel agents for %d channels from disk", len(_persisted))
+
+
+def _get_state(channel_id: int) -> ChannelState:
     if channel_id not in _channels:
-        _channels[channel_id] = ChannelState(default_agents)
+        _channels[channel_id] = ChannelState([])
     return _channels[channel_id]
 
 
@@ -245,7 +282,6 @@ class CirclesBot(discord.Bot):
         self.voice_handler = DiscordVoiceHandler(
             registry, oracle, mistral_client, self.webhook_mgr
         )
-        self._default_agents: list[str] = list(registry.agents.keys())
         self._channel_locks: dict[int, asyncio.Lock] = {}
 
     def _get_lock(self, channel_id: int) -> asyncio.Lock:
@@ -255,7 +291,7 @@ class CirclesBot(discord.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Discord bot ready: %s (id=%s)", self.user, self.user.id)
-        logger.info("Default agents: %s", self._default_agents)
+        logger.info("Available agents: %s", list(self.registry.agents.keys()))
 
     async def on_voice_state_update(
         self,
@@ -290,7 +326,7 @@ class CirclesBot(discord.Bot):
             if not text_channel:
                 return
 
-            state = _get_state(text_channel.id, self._default_agents)
+            state = _get_state(text_channel.id)
 
             try:
                 await self.voice_handler.join(after.channel, text_channel, state.conv)
@@ -435,7 +471,7 @@ class CirclesBot(discord.Bot):
             # Check if this is an agent thread
             parent = channel.parent
             if isinstance(parent, discord.TextChannel):
-                state = _get_state(parent.id, self._default_agents)
+                state = _get_state(parent.id)
                 agent_id = state.thread_to_agent.get(channel.id)
                 if agent_id:
                     await self._handle_thread_message(
@@ -447,11 +483,20 @@ class CirclesBot(discord.Bot):
         if not isinstance(channel, discord.TextChannel):
             return
 
-        state = _get_state(channel.id, self._default_agents)
+        state = _get_state(channel.id)
 
         content = message.content.strip()
         attachments = self._extract_attachments(message)
         if not content and not attachments:
+            return
+
+        # No agents in channel — hint to /invite
+        if not state.agent_ids:
+            available = ", ".join(f"`{a}`" for a in self.registry.agents.keys())
+            await channel.send(
+                f"No agents in this channel yet. Use `/invite <agent>` to add one.\n"
+                f"Available: {available}"
+            )
             return
 
         # Record user message
@@ -464,12 +509,10 @@ class CirclesBot(discord.Bot):
 
         logger.info("Processing group message in #%s: %r", channel.name, content[:50])
         logger.info("Active agents: %s", state.agent_ids)
-        logger.info("Conv participants: %s", state.conv.participant_agent_ids)
 
         # Run group round inline (no thread)
         lock = self._get_lock(channel.id)
         async with lock:
-            # Show typing while processing
             async with channel.typing():
                 await self._run_group(state.conv, content, attachments, channel)
 
@@ -730,7 +773,7 @@ def register_commands(bot: CirclesBot) -> None:
             await ctx.respond("Use in a text channel.", ephemeral=True)
             return
 
-        state = _get_state(ctx.channel_id, bot._default_agents)
+        state = _get_state(ctx.channel_id)
         await ctx.respond("⏳ Setting up agent threads...", ephemeral=True)
         await bot.ensure_agent_threads(ctx.channel, state)
         names = [bot.registry.get(a).name for a in state.agent_ids if bot.registry.get(a)]
@@ -741,10 +784,8 @@ def register_commands(bot: CirclesBot) -> None:
         description="Add an agent to this channel",
         guild_ids=guild_ids,
     )
-    async def cmd_invite(
-        ctx: discord.ApplicationContext,
-        agent: discord.Option(str, description="Agent ID (e.g. emma, sofia, dan)"),
-    ) -> None:
+    @discord.option("agent", type=str, description="Agent ID (e.g. emma, sofia, dan)")
+    async def cmd_invite(ctx: discord.ApplicationContext, agent: str) -> None:
         agent_id = agent.strip().lower()
         profile = bot.registry.get(agent_id)
         if not profile:
@@ -756,27 +797,26 @@ def register_commands(bot: CirclesBot) -> None:
             await ctx.respond("Use in a text channel.", ephemeral=True)
             return
 
-        state = _get_state(ctx.channel_id, bot._default_agents)
+        state = _get_state(ctx.channel_id)
         if agent_id in state.agent_ids:
             await ctx.respond(f"**{profile.name}** is already in this channel.", ephemeral=True)
             return
 
         state.agent_ids.append(agent_id)
         state.conv.participant_agent_ids = list(state.agent_ids)
+        _save_channel_agents()
 
         # Create thread for the new agent
         await bot.ensure_agent_threads(ctx.channel, state)
-        await ctx.respond(f"✅ **{profile.name}** ({profile.role}) has joined the channel!")
+        await ctx.respond(f"**{profile.name}** ({profile.role}) has joined the channel!")
 
     @bot.slash_command(
         name="dismiss",
         description="Remove an agent from this channel",
         guild_ids=guild_ids,
     )
-    async def cmd_dismiss(
-        ctx: discord.ApplicationContext,
-        agent: discord.Option(str, description="Agent ID to remove"),
-    ) -> None:
+    @discord.option("agent", type=str, description="Agent ID to remove")
+    async def cmd_dismiss(ctx: discord.ApplicationContext, agent: str) -> None:
         agent_id = agent.strip().lower()
         profile = bot.registry.get(agent_id)
 
@@ -784,13 +824,14 @@ def register_commands(bot: CirclesBot) -> None:
             await ctx.respond("Use in a text channel.", ephemeral=True)
             return
 
-        state = _get_state(ctx.channel_id, bot._default_agents)
+        state = _get_state(ctx.channel_id)
         if agent_id not in state.agent_ids:
             await ctx.respond(f"`{agent_id}` is not in this channel.", ephemeral=True)
             return
 
         state.agent_ids.remove(agent_id)
         state.conv.participant_agent_ids = list(state.agent_ids)
+        _save_channel_agents()
 
         # Archive the agent's thread
         thread = state.agent_threads.pop(agent_id, None)
@@ -820,11 +861,9 @@ def register_commands(bot: CirclesBot) -> None:
     @bot.slash_command(
         name="topic", description="Set the discussion topic", guild_ids=guild_ids
     )
-    async def cmd_topic(
-        ctx: discord.ApplicationContext,
-        topic: discord.Option(str, description="Topic for the agents to discuss"),
-    ) -> None:
-        state = _get_state(ctx.channel_id, bot._default_agents)
+    @discord.option("topic", type=str, description="Topic for the agents to discuss")
+    async def cmd_topic(ctx: discord.ApplicationContext, topic: str) -> None:
+        state = _get_state(ctx.channel_id)
         state.conv.topic = topic
         await ctx.respond(f"📌 Topic set: **{topic}**")
 
@@ -842,7 +881,7 @@ def register_commands(bot: CirclesBot) -> None:
         name="who", description="Show which agents are active in this channel", guild_ids=guild_ids
     )
     async def cmd_who(ctx: discord.ApplicationContext) -> None:
-        state = _get_state(ctx.channel_id, bot._default_agents)
+        state = _get_state(ctx.channel_id)
         lines = []
         for aid in state.agent_ids:
             agent = bot.registry.get(aid)
@@ -860,19 +899,16 @@ def register_commands(bot: CirclesBot) -> None:
         description="Create a new AI agent with a custom personality",
         guild_ids=guild_ids,
     )
+    @discord.option("name", type=str, description="Agent name")
+    @discord.option("role", type=str, description="Agent role (e.g. 'Data Scientist')")
+    @discord.option("personality", type=str, description="Personality traits", required=False, default="")
+    @discord.option("tools", type=str, description="Comma-separated tools: create_slides, code_interpreter, web_search, image_generation", required=False, default="")
     async def cmd_create_agent(
         ctx: discord.ApplicationContext,
-        name: discord.Option(str, "Agent name"),
-        role: discord.Option(str, "Agent role (e.g. 'Data Scientist')"),
-        personality: discord.Option(
-            str, "Personality traits", required=False, default=""
-        ),
-        tools: discord.Option(
-            str,
-            "Comma-separated tools: create_slides, code_interpreter, web_search, image_generation",
-            required=False,
-            default="",
-        ),
+        name: str,
+        role: str,
+        personality: str,
+        tools: str,
     ) -> None:
         agent_id = name.lower().replace(" ", "_")
         if bot.registry.get(agent_id):
