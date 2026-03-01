@@ -99,10 +99,8 @@ def _build_slides_embed(content: str) -> discord.Embed | None:
         return None
 
     base_url = match.group(1)
-    # Ensure we get the base slide URL (without /pdf suffix)
     if base_url.endswith("/pdf"):
         base_url = base_url[: -len("/pdf")]
-    pdf_url = f"{base_url}/pdf"
 
     embed = discord.Embed(
         title="Presentation Created",
@@ -111,11 +109,6 @@ def _build_slides_embed(content: str) -> discord.Embed | None:
     embed.add_field(
         name="View Slides",
         value=f"[Open in browser]({base_url})",
-        inline=True,
-    )
-    embed.add_field(
-        name="Download PDF",
-        value=f"[Download]({pdf_url})",
         inline=True,
     )
     return embed
@@ -179,7 +172,9 @@ class WebhookManager:
             if thread:
                 kwargs["thread"] = thread
             if silent:
-                kwargs["flags"] = discord.MessageFlags(suppress_notifications=True)
+                # py-cord webhooks don't support flags kwarg directly;
+                # pass the raw integer flag for SUPPRESS_NOTIFICATIONS (1 << 12)
+                kwargs["flags"] = 4096
             # Attach the slides embed to the last chunk
             if slide_embed and i == len(chunks) - 1:
                 kwargs["embeds"] = [slide_embed]
@@ -252,6 +247,7 @@ if _persisted:
 
 def _get_state(channel_id: int) -> ChannelState:
     if channel_id not in _channels:
+        logger.info("Creating new empty ChannelState for %d (known: %s)", channel_id, list(_channels.keys()))
         _channels[channel_id] = ChannelState([])
     return _channels[channel_id]
 
@@ -360,8 +356,14 @@ class CirclesBot(discord.Bot):
 
             try:
                 await self.voice_handler.join(after.channel, text_channel, state.conv)
+                agent_names = [
+                    self.registry.get(a).name
+                    for a in state.agent_ids
+                    if self.registry.get(a)
+                ]
+                names_str = ", ".join(f"**{n}**" for n in agent_names)
                 await text_channel.send(
-                    f"Joined **{after.channel.name}** — unmute to talk, mute to send!",
+                    f"{names_str} joined **{after.channel.name}** — unmute to talk, mute to send!",
                     silent=True,
                 )
             except Exception:
@@ -405,6 +407,16 @@ class CirclesBot(discord.Bot):
         Each agent gets a thread named "💬 AgentName" — these appear in the
         thread sidebar, emulating a member list. Typing in them = 1:1 chat.
         """
+        # Fetch ALL active threads from the API (not the stale gateway cache)
+        try:
+            fetched = await channel.guild.fetch_active_threads()
+            active_threads = [
+                t for t in fetched.threads if t.parent_id == channel.id
+            ]
+        except Exception:
+            logger.warning("Failed to fetch active threads, falling back to cache")
+            active_threads = list(channel.threads)
+
         for agent_id in state.agent_ids:
             if agent_id in state.agent_threads:
                 # Check if thread still exists / is accessible
@@ -425,10 +437,12 @@ class CirclesBot(discord.Bot):
                 if not agent:
                     continue
 
-                # Check for existing thread first
-                existing_threads = channel.threads
-                for t in existing_threads:
-                    if t.name == f"💬 {agent.name}":
+                thread_name = f"💬 {agent.name}"
+
+                # Check active threads (fetched from API)
+                for t in active_threads:
+                    if t.name == thread_name:
+                        logger.info("Found existing active thread for %s: %s", agent_id, t.id)
                         state.agent_threads[agent_id] = t
                         state.thread_to_agent[t.id] = agent_id
                         break
@@ -437,7 +451,8 @@ class CirclesBot(discord.Bot):
                     # Also check archived threads
                     try:
                         async for t in channel.archived_threads():
-                            if t.name == f"💬 {agent.name}":
+                            if t.name == thread_name:
+                                logger.info("Found archived thread for %s, unarchiving", agent_id)
                                 await t.edit(archived=False)
                                 state.agent_threads[agent_id] = t
                                 state.thread_to_agent[t.id] = agent_id
@@ -475,7 +490,7 @@ class CirclesBot(discord.Bot):
                         )
                         state.agent_threads[agent_id] = thread
                         state.thread_to_agent[thread.id] = agent_id
-                        logger.info("Created thread for %s: %s", agent_id, thread.id)
+                        logger.info("Created NEW thread for %s: %s", agent_id, thread.id)
                     except Exception:
                         logger.exception("Failed to create thread for %s", agent_id)
 
@@ -511,6 +526,12 @@ class CirclesBot(discord.Bot):
                     return
             return  # Ignore other threads
 
+        # Accept text channels and voice channel text chat
+        if isinstance(channel, discord.VoiceChannel):
+            # Voice channel text chat — route through the voice handler's conversation
+            await self._handle_voice_text(message, channel)
+            return
+
         if not isinstance(channel, discord.TextChannel):
             return
 
@@ -521,8 +542,9 @@ class CirclesBot(discord.Bot):
         if not content and not attachments:
             return
 
-        # No agents in channel — hint to /invite
+        # No agents in channel — hint to /invite (only once per channel)
         if not state.agent_ids:
+            logger.info("No agents for channel_id=%d (#%s), sending hint", channel.id, channel.name)
             available = ", ".join(f"`{a}`" for a in self.registry.agents.keys())
             await channel.send(
                 f"No agents in this channel yet. Use `/invite <agent>` to add one.\n"
@@ -541,7 +563,7 @@ class CirclesBot(discord.Bot):
         logger.info("Processing group message in #%s: %r", channel.name, content[:50])
         logger.info("Active agents: %s", state.agent_ids)
 
-        # Run group round inline (no thread)
+        # Run group round inline
         lock = self._get_lock(channel.id)
         async with lock:
             async with channel.typing():
@@ -600,6 +622,65 @@ class CirclesBot(discord.Bot):
             if att.content_type and att.content_type.startswith("image/"):
                 attachments.append(Attachment(type="image", url=att.url))
         return attachments
+
+    async def _extract_file_contents(self, message: discord.Message) -> str:
+        """Download text-based file attachments and return their contents."""
+        parts: list[str] = []
+        TEXT_TYPES = {"text/", "application/json", "application/xml", "application/javascript"}
+        TEXT_EXTS = {".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".xml", ".yaml", ".yml",
+                     ".html", ".css", ".sql", ".sh", ".rb", ".go", ".rs", ".java", ".c", ".cpp",
+                     ".h", ".toml", ".ini", ".cfg", ".env", ".log", ".tex", ".rst"}
+        for att in message.attachments:
+            is_text = (att.content_type and any(att.content_type.startswith(t) for t in TEXT_TYPES))
+            is_text_ext = any(att.filename.lower().endswith(ext) for ext in TEXT_EXTS)
+            if is_text or is_text_ext:
+                try:
+                    data = await att.read()
+                    text = data.decode("utf-8", errors="replace")
+                    parts.append(f"--- {att.filename} ---\n{text}")
+                    logger.info("Read file attachment: %s (%d chars)", att.filename, len(text))
+                except Exception:
+                    logger.exception("Failed to read attachment %s", att.filename)
+        return "\n\n".join(parts)
+
+    async def _handle_voice_text(
+        self, message: discord.Message, voice_channel: discord.VoiceChannel
+    ) -> None:
+        """Handle text messages in voice channel chat.
+
+        Reuses the voice handler's _respond() for oracle + TTS + text channel logging.
+        Also posts responses in the voice channel text chat.
+        Supports images and file attachments (text files read inline).
+        """
+        if not self.voice_handler.is_connected or not self.voice_handler._conv:
+            logger.info("Voice text ignored — not in voice")
+            return
+
+        content = message.content.strip()
+        attachments = self._extract_attachments(message)
+        file_contents = await self._extract_file_contents(message)
+
+        if file_contents:
+            content = f"{content}\n\n{file_contents}" if content else file_contents
+
+        if not content and not attachments:
+            return
+
+        logger.info("Voice text chat: %r (%d attachments, %d file chars)",
+                     content[:80], len(attachments), len(file_contents))
+
+        conv = self.voice_handler._conv
+        user_msg = Message(
+            role=MessageRole.USER,
+            content=content,
+            attachments=attachments,
+        )
+        conv.messages.append(user_msg)
+
+        # Reuse voice handler's _respond — handles oracle, TTS, text channel posting
+        await self.voice_handler._respond(
+            content, attachments=attachments or None, voice_channel=voice_channel
+        )
 
     # ── Group round ──────────────────────────────────────────────────
 
@@ -800,6 +881,7 @@ def register_commands(bot: CirclesBot) -> None:
         guild_ids=guild_ids,
     )
     async def cmd_init(ctx: discord.ApplicationContext) -> None:
+        logger.info("/init called: channel=%s interaction_id=%s", ctx.channel, ctx.interaction.id)
         if not isinstance(ctx.channel, discord.TextChannel):
             await ctx.respond("Use in a text channel.", ephemeral=True)
             return
@@ -817,6 +899,7 @@ def register_commands(bot: CirclesBot) -> None:
     )
     @discord.option("agent", type=str, description="Agent ID (e.g. emma, sofia, dan)")
     async def cmd_invite(ctx: discord.ApplicationContext, agent: str) -> None:
+        logger.info("/invite called: agent=%r channel=%s interaction_id=%s", agent, ctx.channel, ctx.interaction.id)
         agent_id = agent.strip().lower()
         profile = bot.registry.get(agent_id)
         if not profile:
@@ -837,9 +920,7 @@ def register_commands(bot: CirclesBot) -> None:
         state.conv.participant_agent_ids = list(state.agent_ids)
         _save_channel_agents()
 
-        # Create thread for the new agent
-        await bot.ensure_agent_threads(ctx.channel, state)
-        await ctx.respond(f"**{profile.name}** ({profile.role}) has joined the channel!")
+        await ctx.respond(f"**{profile.name}** ({profile.role}) has joined the channel.")
 
     @bot.slash_command(
         name="dismiss",
@@ -848,6 +929,7 @@ def register_commands(bot: CirclesBot) -> None:
     )
     @discord.option("agent", type=str, description="Agent ID to remove")
     async def cmd_dismiss(ctx: discord.ApplicationContext, agent: str) -> None:
+        logger.info("/dismiss called: agent=%r channel=%s", agent, ctx.channel)
         agent_id = agent.strip().lower()
         profile = bot.registry.get(agent_id)
 

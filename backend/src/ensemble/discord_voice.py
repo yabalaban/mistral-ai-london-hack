@@ -11,8 +11,7 @@ import asyncio
 import audioop
 import base64
 import logging
-import tempfile
-from pathlib import Path
+import os
 from typing import Any
 
 import discord
@@ -25,9 +24,10 @@ from ensemble.conversations.models import (
     Message,
     MessageRole,
 )
+from ensemble.events import SystemEvent, event_bus
 from ensemble.oracle.engine import OracleEngine
 from ensemble.voice.stt import RealtimeSTTSession
-from ensemble.voice.tts import synthesize
+from ensemble.voice.tts import DEFAULT_MODEL, DEFAULT_VOICE_ID
 
 logger = logging.getLogger(__name__)
 
@@ -127,40 +127,74 @@ class DiscordVoiceHandler:
         sink = _make_streaming_sink(self._audio_queue, loop)
         logger.info("Audio queue and streaming sink created")
 
-        # Start ElevenLabs realtime STT with MANUAL commit (mute = commit)
-        self._stt_session = RealtimeSTTSession(auto_commit=False)
-        await self._stt_session.connect()
-        logger.info("STT session connected (MANUAL commit)")
+        # STT session created lazily on unmute or first audio (not eagerly)
+        self._stt_session = None
 
         # Start recording with our streaming sink
         self._vc.start_recording(sink, self._on_recording_stopped)
         logger.info("Recording started with streaming sink")
 
-        # Background tasks: feed audio to STT + listen for transcripts
+        # Background task: feed audio to STT (listener started on demand)
         self._feed_task = asyncio.create_task(self._feed_audio_loop())
-        self._listen_task = asyncio.create_task(self._listen_transcripts())
-        logger.info("Voice pipeline active: feed_audio + listen_transcripts tasks started")
+        self._listen_task = None
+        logger.info("Voice pipeline active: feed_audio task started, STT on demand")
 
     async def _on_recording_stopped(self, sink: Sink, *args) -> None:
         logger.info("Recording stopped")
 
+    async def _ensure_stt(self) -> None:
+        """Create a fresh STT session + listener if not already active."""
+        if self._stt_session and not self._stt_session._closed:
+            return  # already connected
+        logger.info("Creating new STT session")
+        self._stt_session = RealtimeSTTSession(auto_commit=False)
+        await self._stt_session.connect()
+        # (Re)start the transcript listener
+        if self._listen_task is None or self._listen_task.done():
+            self._listen_task = asyncio.create_task(self._listen_transcripts())
+        logger.info("STT session ready")
+
     async def _feed_audio_loop(self) -> None:
-        """Read from audio queue and feed to ElevenLabs STT."""
+        """Read from audio queue and feed to ElevenLabs STT.
+
+        Creates STT session on demand when audio first arrives.
+        Detects PTT release: if no audio for >1.5s after receiving, commits STT.
+        """
         chunk_count = 0
+        _SILENCE_TIMEOUT = 1.5  # seconds without audio → commit
+        was_receiving = False
+
         while self._active:
             try:
                 user_id, pcm_16k = await asyncio.wait_for(
-                    self._audio_queue.get(), timeout=1.0
+                    self._audio_queue.get(), timeout=_SILENCE_TIMEOUT
                 )
+                # Audio arrived — ensure STT is connected
+                if not self._stt_session or self._stt_session._closed:
+                    try:
+                        await self._ensure_stt()
+                    except Exception:
+                        logger.exception("Failed to create STT session")
+                        continue
+
+                was_receiving = True
                 chunk_count += 1
                 if chunk_count == 1:
-                    logger.info("First audio chunk received from user %s (%d bytes)", user_id, len(pcm_16k))
+                    logger.info("First audio chunk from user %s (%d bytes)", user_id, len(pcm_16k))
                 elif chunk_count % 100 == 0:
                     logger.info("Audio chunk #%d (queue size: %d)", chunk_count, self._audio_queue.qsize())
-                if self._stt_session:
+                if self._stt_session and not self._stt_session._closed:
                     b64 = base64.b64encode(pcm_16k).decode()
                     await self._stt_session.send_audio(b64)
             except asyncio.TimeoutError:
+                # No audio for _SILENCE_TIMEOUT — if we were receiving, treat as PTT release
+                if was_receiving and self._stt_session and not self._stt_session._closed:
+                    logger.info("Audio silence detected (PTT release) — committing STT")
+                    try:
+                        await self._stt_session.commit()
+                    except Exception:
+                        logger.exception("PTT auto-commit failed")
+                    was_receiving = False
                 continue
             except asyncio.CancelledError:
                 break
@@ -168,10 +202,15 @@ class DiscordVoiceHandler:
                 logger.exception("Feed audio error")
 
     async def _listen_transcripts(self) -> None:
-        """Listen for STT events and trigger agent responses."""
+        """Listen for STT events and trigger agent responses.
+
+        Runs until the STT connection closes, then exits.
+        A new listener is started by _ensure_stt() when audio resumes.
+        """
         if not self._stt_session:
             return
 
+        logger.info("Transcript listener started")
         try:
             async for event in self._stt_session.iter_events():
                 if not self._active:
@@ -200,77 +239,177 @@ class DiscordVoiceHandler:
                             self._response_task.cancel()
                         self._response_task = asyncio.create_task(self._respond(text))
 
-                else:
-                    # Partial transcript — could show typing indicator
-                    pass
-
         except asyncio.CancelledError:
             pass
         except Exception:
             logger.exception("Transcript listener error")
 
-    async def _respond(self, content: str) -> None:
+        logger.info("Transcript listener ended (STT connection closed)")
+
+    async def _respond(
+        self,
+        content: str,
+        attachments: list | None = None,
+        voice_channel: Any | None = None,
+    ) -> None:
+        """Run oracle round: post text responses + play TTS.
+
+        Args:
+            content: User message text.
+            attachments: Optional image/file attachments.
+            voice_channel: If set, also post text responses there (voice text chat).
+        """
         if not self._conv or not self._vc:
             logger.warning("_respond called but conv=%s vc=%s", bool(self._conv), bool(self._vc))
             return
 
-        logger.info("Oracle start for transcript (voice_mode=True): %r", content)
+        conv_id = self._conv.id
+        ch_name = self._text_channel.name if self._text_channel else "voice"
+        source_label = f"🎙#{ch_name}"
+        voice_mode = attachments is None  # STT = voice_mode, text chat = not
+
+        def _emit(etype: str, edata: dict | None = None) -> None:
+            event_bus.emit(SystemEvent(
+                type=etype,
+                conversation_id=conv_id,
+                source="discord-voice",
+                source_label=source_label,
+                data=edata or {},
+            ))
+
+        logger.info("Oracle start (voice_mode=%s): %r", voice_mode, content[:80])
+        _emit("user_message", {"content": content})
+
         try:
             async for event_type, data in self.oracle.run_group_turn_streaming(
-                self._conv, content, None, voice_mode=True
+                self._conv, content, attachments, voice_mode=voice_mode
             ):
                 logger.info("Oracle event: %s", event_type)
+
                 if event_type == "turn_change":
                     logger.info("  turn_change → agent_id=%s", data.get("agent_id"))
+                    _emit("turn_change", data)
+
+                elif event_type == "oracle_start":
+                    _emit("oracle_start", data)
+
+                elif event_type == "oracle":
+                    _emit("oracle", data)
+
                 elif event_type == "message":
                     msg = data
                     logger.info("  message from %s (%d chars)", msg.agent_id, len(msg.content or ""))
+                    _emit("message", {
+                        "agent_id": msg.agent_id,
+                        "content": msg.content or "",
+                    })
                     agent = self.registry.get(msg.agent_id)
                     if agent and msg.content:
-                        # Post text for attribution (silent — no push notification)
+                        # Post to linked text channel
                         if self._text_channel:
                             try:
                                 await self.webhook_mgr.send_as_agent(
-                                    self._text_channel, agent, msg.content, silent=True
+                                    self._text_channel, agent, msg.content
                                 )
                             except Exception:
                                 logger.exception("Failed to send text for %s", msg.agent_id)
 
-                        # Play TTS
-                        await self._play_agent_tts(agent, msg.content)
+                        # Post to voice channel text chat (if text-initiated)
+                        if voice_channel:
+                            try:
+                                await self.webhook_mgr.send_as_agent(
+                                    voice_channel, agent, msg.content
+                                )
+                            except Exception:
+                                logger.warning("Webhook failed for voice channel, using plain send")
+                                try:
+                                    await voice_channel.send(f"**{agent.name}**: {msg.content}")
+                                except Exception:
+                                    logger.exception("Failed to send to voice channel")
+
+                        # Queue TTS (don't block oracle loop)
+                        asyncio.create_task(self._play_agent_tts(agent, msg.content))
+
                 elif event_type == "grader":
                     logger.info("  grader: done=%s", data.get("done"))
+                    _emit("grader", data)
+
+                elif event_type == "agent_verdict":
+                    _emit("agent_verdict", data)
+
+                elif event_type == "topic_set":
+                    _emit("topic_set", data)
+
+                elif event_type == "summary":
+                    _emit("summary", data)
+
+                elif event_type in ("chunk", "message_partial", "agent_cancel"):
+                    pass
+
+                else:
+                    _emit(event_type, data if isinstance(data, dict) else {})
 
             logger.info("Oracle round complete for: %r", content[:50])
         except Exception:
             logger.exception("Voice response round failed")
 
     async def _play_agent_tts(self, agent: AgentProfile, text: str) -> None:
+        """Stream TTS audio to Discord voice — starts playing as chunks arrive."""
         if not self._vc or not self._vc.is_connected():
             logger.warning("TTS skipped — voice client not connected")
             return
 
-        voice_id = agent.voice_id or ""
-        logger.info("TTS synthesizing: agent=%s, voice_id=%s, %d chars", agent.id, voice_id, len(text))
-        try:
-            audio_bytes = await synthesize(text, voice_id=voice_id)
-        except Exception:
-            logger.exception("TTS failed for %s", agent.id)
+        from elevenlabs.client import AsyncElevenLabs
+        from ensemble.config import settings
+
+        if not settings.elevenlabs_api_key:
+            logger.warning("TTS skipped — no ElevenLabs API key")
             return
 
-        logger.info("TTS complete: %d bytes for %s", len(audio_bytes), agent.id)
+        voice_id = agent.voice_id or DEFAULT_VOICE_ID
+        logger.info("TTS streaming: agent=%s, voice_id=%s, %d chars", agent.id, voice_id, len(text))
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        tmp.write(audio_bytes)
-        tmp.close()
+        # Create a pipe: we write MP3 chunks to write_fd, FFmpeg reads from read_fd
+        read_fd, write_fd = os.pipe()
+
+        async def _feed_tts() -> None:
+            """Stream ElevenLabs audio chunks into the pipe."""
+            total = 0
+            chunks = 0
+            write_file = os.fdopen(write_fd, "wb")
+            try:
+                client = AsyncElevenLabs(api_key=settings.elevenlabs_api_key)
+                audio_stream = client.text_to_speech.stream(
+                    text=text,
+                    voice_id=voice_id,
+                    model_id=DEFAULT_MODEL,
+                )
+                async for chunk in audio_stream:
+                    if isinstance(chunk, bytes) and chunk:
+                        write_file.write(chunk)
+                        write_file.flush()
+                        total += len(chunk)
+                        chunks += 1
+                        if chunks == 1:
+                            logger.info("TTS first chunk: %d bytes (agent=%s)", len(chunk), agent.id)
+                logger.info("TTS stream done: %d chunks, %d bytes (agent=%s)", chunks, total, agent.id)
+            except Exception:
+                logger.exception("TTS streaming failed for %s", agent.id)
+            finally:
+                write_file.close()
 
         async with self._playing_lock:
             if not self._vc or not self._vc.is_connected():
-                logger.warning("Voice client disconnected before playback")
-                Path(tmp.name).unlink(missing_ok=True)
+                os.close(read_fd)
+                os.close(write_fd)
                 return
 
-            source = discord.FFmpegPCMAudio(tmp.name)
+            # Start feeding TTS chunks in background
+            feed_task = asyncio.create_task(_feed_tts())
+
+            # FFmpeg reads from pipe, decodes MP3 → PCM for Discord
+            read_file = os.fdopen(read_fd, "rb")
+            source = discord.FFmpegPCMAudio(read_file, pipe=True)
             done_event = asyncio.Event()
 
             def after_play(error: Exception | None) -> None:
@@ -278,18 +417,27 @@ class DiscordVoiceHandler:
                     logger.error("FFmpeg playback error: %s", error)
                 else:
                     logger.info("FFmpeg playback complete for %s", agent.id)
-                Path(tmp.name).unlink(missing_ok=True)
+                try:
+                    read_file.close()
+                except Exception:
+                    pass
                 if self._vc and self._vc.loop:
                     self._vc.loop.call_soon_threadsafe(done_event.set)
 
             try:
-                logger.info("FFmpeg playback started for %s", agent.id)
+                logger.info("FFmpeg streaming playback started for %s", agent.id)
                 self._vc.play(source, after=after_play)
             except Exception:
                 logger.exception("play() raised for %s", agent.id)
-                Path(tmp.name).unlink(missing_ok=True)
+                feed_task.cancel()
+                try:
+                    read_file.close()
+                except Exception:
+                    pass
                 return
+
             await done_event.wait()
+            await feed_task  # ensure feed completes cleanly
 
     async def on_user_mute(self) -> None:
         """User muted — commit STT to finalize transcript."""
@@ -298,14 +446,12 @@ class DiscordVoiceHandler:
             await self._stt_session.commit()
 
     async def on_user_unmute(self) -> None:
-        """User unmuted — reconnect STT if connection was closed."""
-        if self._stt_session and self._stt_session._closed:
-            logger.info("Reconnecting STT (user unmuted)")
-            self._stt_session = RealtimeSTTSession(auto_commit=False)
-            await self._stt_session.connect()
-            # Restart the transcript listener
-            if self._listen_task and self._listen_task.done():
-                self._listen_task = asyncio.create_task(self._listen_transcripts())
+        """User unmuted — create fresh STT session."""
+        logger.info("User unmuted — ensuring STT session")
+        try:
+            await self._ensure_stt()
+        except Exception:
+            logger.exception("Failed to create STT on unmute")
 
     async def leave(self) -> None:
         logger.info("Voice leave: starting cleanup")

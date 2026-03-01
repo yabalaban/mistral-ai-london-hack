@@ -80,11 +80,13 @@ export function RoundCard({ round }: RoundCardProps) {
       >
         {/* Source badge */}
         <div class={`mt-0.5 text-[10px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ${
-          round.source === 'discord'
-            ? 'bg-indigo-100 text-indigo-700'
-            : 'bg-emerald-100 text-emerald-700'
+          round.source === 'discord-voice'
+            ? 'bg-violet-100 text-violet-700'
+            : round.source === 'discord'
+              ? 'bg-indigo-100 text-indigo-700'
+              : 'bg-emerald-100 text-emerald-700'
         }`}>
-          {round.source === 'discord' ? 'Discord' : 'Web'}
+          {round.source === 'discord-voice' ? '🎙 Voice' : round.source === 'discord' ? 'Discord' : 'Web'}
         </div>
 
         {/* Content */}

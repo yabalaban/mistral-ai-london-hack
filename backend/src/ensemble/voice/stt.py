@@ -122,6 +122,8 @@ class RealtimeSTTSession:
 
         def on_close() -> None:
             logger.info("STT connection closed")
+            self._closed = True
+            self._connection = None
             self._queue.put_nowait(None)
 
         self._connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, on_partial)
