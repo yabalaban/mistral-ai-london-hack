@@ -635,7 +635,9 @@ class CirclesBot(discord.Bot):
                 try:
                     data = await att.read()
                     text = data.decode("utf-8", errors="replace")
-                    parts.append(f"--- {att.filename} ---\n{text}")
+                    parts.append(
+                        f"[Uploaded file: {att.filename}]\n{text}\n[End of file]"
+                    )
                     logger.info("Read file attachment: %s (%d chars)", att.filename, len(text))
                 except Exception:
                     logger.exception("Failed to read attachment %s", att.filename)

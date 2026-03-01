@@ -73,7 +73,7 @@ def _parse_json(text: str) -> dict:
 
 
 MAX_CONTEXT_MESSAGES = 15
-MAX_ROUNDS = 10
+MAX_ROUNDS = 5
 PASS_TOKEN = "[PASS]"
 PASS_VARIANTS = {"[pass]", "pass", "[pass].", "pass."}
 
