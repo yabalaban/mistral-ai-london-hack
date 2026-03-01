@@ -1,41 +1,13 @@
 import type { Agent } from '../../types/index.ts'
 import { Avatar } from '../shared/Avatar.tsx'
-import { createConversation, deleteAgent } from '../../api/client.ts'
+import { deleteAgent } from '../../api/client.ts'
 import { agents } from '../../state/agents.ts'
-import { upsertConversation, activeConversationId } from '../../state/conversations.ts'
-import { route } from 'preact-router'
-import { USE_MOCKS } from '../../config.ts'
 
 interface AgentCardProps {
   agent: Agent
 }
 
 export function AgentCard({ agent }: AgentCardProps) {
-  const startChat = async () => {
-    if (USE_MOCKS) {
-      const mockConv = {
-        id: `conv-${agent.id}`,
-        type: 'direct' as const,
-        participants: ['user', agent.id],
-        messages: [],
-        created_at: new Date().toISOString(),
-      }
-      upsertConversation(mockConv)
-      activeConversationId.value = mockConv.id
-      route(`/chat/${mockConv.id}`)
-      return
-    }
-
-    try {
-      const conv = await createConversation('direct', [agent.id])
-      upsertConversation(conv)
-      activeConversationId.value = conv.id
-      route(`/chat/${conv.id}`)
-    } catch (err) {
-      console.error('Failed to create conversation', err)
-    }
-  }
-
   const handleDelete = async (e: Event) => {
     e.stopPropagation()
     if (!confirm(`Remove ${agent.name}?`)) return
@@ -48,10 +20,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   }
 
   return (
-    <div
-      onClick={startChat}
-      class="glass rounded-2xl p-4 hover:-translate-y-1 hover:glow-soft transition-all duration-200 cursor-pointer group"
-    >
+    <div class="glass rounded-2xl p-4 group">
       <div class="flex items-start gap-3">
         <Avatar name={agent.name} src={agent.avatar} size="lg" />
         <div class="min-w-0 flex-1">

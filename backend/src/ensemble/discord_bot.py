@@ -29,6 +29,7 @@ from ensemble.conversations.models import (
     MessageRole,
 )
 from ensemble.discord_voice import DiscordVoiceHandler
+from ensemble.events import SystemEvent, event_bus
 from ensemble.oracle.engine import OracleEngine
 from ensemble.conversations.manager import _handle_function_calls
 from ensemble.utils import build_inputs, extract_reply, extract_text_from_content
@@ -265,6 +266,11 @@ class CirclesBot(discord.Bot):
         """Auto-join/leave voice channels based on user presence."""
         if member.bot:
             return
+
+        logger.info(
+            "Voice state: user=%s before=%s(mute=%s) after=%s(mute=%s)",
+            member, before.channel, before.self_mute, after.channel, after.self_mute,
+        )
 
         # User joined a voice channel
         if after.channel and (before.channel != after.channel):
@@ -531,35 +537,89 @@ class CirclesBot(discord.Bot):
         channel: discord.TextChannel,
     ) -> None:
         """Run an oracle round and post agent responses inline in the channel."""
+        logger.info("Discord group round start: channel=#%s content=%r", channel.name, content[:80])
+        source_label = f"#{channel.name}"
+        conv_id = conv.id
+
+        def _emit(etype: str, edata: dict | None = None) -> None:
+            event_bus.emit(SystemEvent(
+                type=etype,
+                conversation_id=conv_id,
+                source="discord",
+                source_label=source_label,
+                data=edata or {},
+            ))
+
+        _emit("user_message", {"content": content})
+
         try:
             async for event_type, data in self.oracle.run_group_turn_streaming(
                 conv, content, attachments or None
             ):
-                if event_type == "message":
+                logger.info("Discord oracle event: %s", event_type)
+
+                if event_type == "oracle_start":
+                    logger.info("  directed=%s goal=%s", data.get("directed"), data.get("goal"))
+                    _emit("oracle_start", data)
+
+                elif event_type == "oracle":
+                    logger.info("  speakers=%s round=%s", data.get("speakers"), data.get("round"))
+                    _emit("oracle", data)
+
+                elif event_type == "turn_change":
+                    logger.info("  turn → %s", data.get("agent_id"))
+                    _emit("turn_change", data)
+
+                elif event_type == "message":
                     msg = data
+                    logger.info("  message from %s (%d chars)", msg.agent_id, len(msg.content or ""))
+                    _emit("message", {
+                        "agent_id": msg.agent_id,
+                        "content": msg.content or "",
+                        "reply_to_id": getattr(msg, "reply_to_id", None),
+                    })
                     agent = self.registry.get(msg.agent_id)
                     if agent and msg.content:
                         await self.webhook_mgr.send_as_agent(channel, agent, msg.content)
 
                 elif event_type == "topic_set":
                     topic = data.get("topic", "")
+                    logger.info("  topic=%s", topic)
+                    _emit("topic_set", data)
                     if topic:
                         conv.topic = topic
 
+                elif event_type == "grader":
+                    logger.info("  grader: done=%s round=%s", data.get("done"), data.get("round"))
+                    _emit("grader", data)
+
+                elif event_type == "agent_verdict":
+                    logger.info("  verdict: %s=%s", data.get("agent_id"), data.get("verdict"))
+                    _emit("agent_verdict", data)
+
                 elif event_type == "summary":
                     summary = data.get("content", "")
+                    logger.info("  summary (%d chars)", len(summary))
+                    _emit("summary", data)
                     if summary:
                         embed = discord.Embed(
-                            title="📋 Round Summary",
+                            title="Round Summary",
                             description=summary,
                             color=0x06B6D4,
                         )
                         await channel.send(embed=embed)
 
+                elif event_type in ("chunk", "message_partial", "agent_cancel"):
+                    pass  # Too frequent / internal — skip dashboard
+
+                else:
+                    _emit(event_type, data if isinstance(data, dict) else {})
+
+            logger.info("Discord group round complete")
         except Exception:
             logger.exception("Discord group round failed")
             try:
-                await channel.send("⚠️ Something went wrong processing that message.")
+                await channel.send("Something went wrong processing that message.")
             except discord.HTTPException:
                 pass
 

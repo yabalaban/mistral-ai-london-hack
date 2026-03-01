@@ -5,15 +5,17 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from mistralai import Mistral
+from starlette.websockets import WebSocketState
 
 from ensemble.agents.registry import AgentRegistry
 from ensemble.api import routes
 from ensemble.api.ws import handle_conversation_ws
 from ensemble.config import settings
 from ensemble.conversations.manager import ConversationManager
+from ensemble.events import event_bus
 from ensemble.oracle.engine import OracleEngine
 
 logging.basicConfig(
@@ -105,6 +107,24 @@ async def conversation_websocket(ws: WebSocket, conversation_id: str):
         oracle=app.state.oracle,
         mistral_client=app.state.mistral_client,
     )
+
+
+@app.websocket("/ws/events")
+async def events_websocket(ws: WebSocket):
+    """Stream all system events to observability dashboard clients."""
+    await ws.accept()
+    q = event_bus.subscribe()
+    try:
+        while True:
+            event = await q.get()
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.send_json(event.to_dict())
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Events WS error")
+    finally:
+        event_bus.unsubscribe(q)
 
 
 @app.get("/health")

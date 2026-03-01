@@ -1,20 +1,7 @@
-import { useState } from 'preact/hooks'
-import { conversations } from '../../state/conversations.ts'
-import { Avatar } from '../shared/Avatar.tsx'
-import { truncate } from '../../utils/format.ts'
-import { agentMap } from '../../state/agents.ts'
-import { NewGroupModal } from '../roster/NewGroupModal.tsx'
-import { createGroupConversation } from '../../utils/conversations.ts'
 import { mobileSidebarOpen } from '../../state/ui.ts'
 
 export function Sidebar() {
-  const [showNewGroup, setShowNewGroup] = useState(false)
   const isOpen = mobileSidebarOpen.value
-
-  const handleCreateGroup = async (agentIds: string[]) => {
-    setShowNewGroup(false)
-    await createGroupConversation(agentIds)
-  }
 
   const closeSidebar = () => {
     mobileSidebarOpen.value = false
@@ -45,58 +32,33 @@ export function Sidebar() {
           </div>
         </div>
 
-        <div class="flex-1 overflow-y-auto p-2">
-          {conversations.value.length === 0 && (
-            <div class="text-sm text-zinc-400 text-center py-8">No conversations yet</div>
-          )}
-          {conversations.value.map((conv) => {
-            const agentIds = conv.participants.filter((p) => p !== 'user')
-            const convAgents = agentIds.map((id) => agentMap.value.get(id)).filter(Boolean)
-            const isGroup = conv.type === 'group'
-            const label = isGroup
-              ? (conv.topic && conv.topic !== 'General discussion'
-                  ? truncate(conv.topic, 28)
-                  : convAgents.map((a) => a!.name).join(', ') || truncate(conv.id, 16))
-              : convAgents[0]?.name ?? truncate(conv.id, 16)
-
-            return (
-              <a
-                key={conv.id}
-                href={isGroup ? `/group/${conv.id}` : `/chat/${conv.id}`}
-                onClick={closeSidebar}
-                class="flex items-center gap-2 px-2 py-1.5 rounded-xl hover:bg-zinc-100 text-zinc-500 hover:text-zinc-900 transition-colors"
-              >
-                {isGroup ? (
-                  <div class="w-8 h-8 flex-shrink-0 rounded-full bg-indigo-50 flex items-center justify-center text-accent text-xs font-bold">
-                    {agentIds.length}
-                  </div>
-                ) : (
-                  <Avatar name={convAgents[0]?.name ?? '?'} src={convAgents[0]?.avatar} size="sm" />
-                )}
-                <span class="text-sm truncate">{label}</span>
-              </a>
-            )
-          })}
-        </div>
-
-        <div class="p-2 border-t border-zinc-200">
-          <button
-            onClick={() => setShowNewGroup(true)}
-            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-xl hover:bg-zinc-100 text-zinc-400 hover:text-zinc-900 transition-colors"
+        <nav class="flex-1 p-3 flex flex-col gap-1">
+          <a
+            href="/"
+            onClick={closeSidebar}
+            class="flex items-center gap-3 px-3 py-2 rounded-xl text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
           >
-            <div class="w-8 h-8 flex-shrink-0 rounded-full bg-zinc-100 border border-dashed border-zinc-300 flex items-center justify-center">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-              </svg>
-            </div>
-            <span class="text-sm">New Group</span>
-          </button>
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span class="text-sm font-medium">Agents</span>
+          </a>
+          <a
+            href="/activity"
+            onClick={closeSidebar}
+            class="flex items-center gap-3 px-3 py-2 rounded-xl text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <span class="text-sm font-medium">Activity Feed</span>
+          </a>
+        </nav>
+
+        <div class="p-3 border-t border-zinc-200">
+          <div class="text-[10px] text-zinc-400 text-center">Observability Dashboard</div>
         </div>
       </div>
-
-      {showNewGroup && (
-        <NewGroupModal onClose={() => setShowNewGroup(false)} onCreate={handleCreateGroup} />
-      )}
     </>
   )
 }
